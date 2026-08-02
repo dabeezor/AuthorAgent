@@ -20,6 +20,7 @@
 import type { ContextEngine } from './context-engine.js';
 import { generateDocxBuffer } from './docx-export.js';
 import { logger } from './logger.js';
+import { projectOutputDir, stepOutputFileName, legacyProjectOutputDir } from './project-paths.js';
 import type {
   Project,
   ProjectStep,
@@ -701,9 +702,9 @@ export class StepExecutor {
 
       // Save to file
       try {
-        const projectDir = join(workspaceDir, 'projects', currentProject.title.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+        const projectDir = projectOutputDir(workspaceDir, currentProject);
         await mkdir(projectDir, { recursive: true });
-        const stepFileName = `${activeStep.id}-${activeStep.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
+        const stepFileName = stepOutputFileName(activeStep);
         await writeFile(join(projectDir, stepFileName), `# ${activeStep.label}\n\n${response}`, 'utf-8');
       } catch (err) {
         logger.debug('step output file save failed', err);
@@ -817,8 +818,7 @@ export class StepExecutor {
         try {
           const { existsSync: exLocal } = await import('fs');
           const { readFile: readF } = await import('fs/promises');
-          const projectSlug = currentProject.title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-          const projectDir = join(workspaceDir, 'projects', projectSlug);
+          const projectDir = projectOutputDir(workspaceDir, currentProject);
 
           const writingSteps = currentProject.steps
             .filter((s: any) => s.phase === 'writing' && s.status === 'completed')
@@ -826,8 +826,9 @@ export class StepExecutor {
 
           const chapterContents: string[] = [];
           for (const ws of writingSteps) {
-            const expectedFile = `${(ws as any).id}-${(ws as any).label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
-            const fullPath = join(projectDir, expectedFile);
+            const fileName = stepOutputFileName(ws);
+            const newPath = join(projectDir, fileName);
+            const fullPath = exLocal(newPath) ? newPath : join(legacyProjectOutputDir(workspaceDir, currentProject), fileName);
             if (exLocal(fullPath)) {
               const raw = await readF(fullPath, 'utf-8');
               const content = raw.replace(/^# .+\n\n/, '');
