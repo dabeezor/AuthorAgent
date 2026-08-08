@@ -376,7 +376,15 @@ export class StepExecutor {
     const openComments = (await listComments(projectDir, step.id)).filter((c) => c.status === 'open');
     const commentsBlock = formatOpenCommentsForAgent(openComments);
 
-    step.prompt = `${step.prompt}\n\n## Reviewer feedback (revision requested)\n\n${feedback}` +
+    const originalPrompt = step.prompt;
+    const currentVersionNumber = await docVersionService.getCurrentVersion(projectDir, step.id);
+    const currentVersionText = currentVersionNumber > 0
+      ? await docVersionService.getVersionContent(projectDir, step.id, currentVersionNumber)
+      : step.result || '';
+
+    // Keep each request self-contained and avoid accumulating stale feedback.
+    step.prompt = `${originalPrompt}\n\n## Current version text\n\n${currentVersionText}` +
+      `\n\n## Reviewer feedback (revision requested)\n\n${feedback}` +
       (commentsBlock ? `\n\n${commentsBlock}` : '');
 
     try {
@@ -412,7 +420,7 @@ export class StepExecutor {
       await mkdir(projectDir, { recursive: true });
       const stepFileName = `${step.id}-${step.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
       const stepContent = `# ${step.label}\n\n${response}`;
-      const version = await docVersionService.appendVersion(projectDir, step.id, stepContent, 'agent-patch', 'Revised from reviewer feedback');
+      const version = await docVersionService.appendVersion(projectDir, step.id, stepContent, 'agent', 'Revised from reviewer feedback');
       await writeFile(join(projectDir, stepFileName), stepContent, 'utf-8');
 
       // openStepGate re-runs applyStepCompletion — since the step's phase is
@@ -424,6 +432,8 @@ export class StepExecutor {
     } catch (error) {
       this.engine.failStep(project.id, step.id, String(error));
       return { ok: false, kind: 'error', error: String(error), project: this.engine.getProject(project.id)! };
+    } finally {
+      step.prompt = originalPrompt;
     }
   }
 
