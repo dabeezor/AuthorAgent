@@ -8,7 +8,7 @@
  * here.
  */
 
-import { ContradictionDetector, type ContradictionReport } from './contradiction-detector.js';
+import type { ContradictionDetector, ContradictionReport } from './contradiction-detector.js';
 import type {
   AICompleteFn,
   AISelectProviderFn,

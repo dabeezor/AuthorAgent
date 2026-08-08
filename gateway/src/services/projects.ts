@@ -52,6 +52,7 @@ import {
   type ExecuteStepOptions,
 } from './step-executor.js';
 import { markDependentsDirty } from './dependency-graph.js';
+import type { DirtyStepClassifier, DirtyStepClassification } from './dirty-step-classifier.js';
 
 const log = logger.child('[projects]');
 
@@ -118,6 +119,7 @@ export class ProjectEngine {
   private messageHandler: MessageHandler | null = null;
   private stepServices: StepServices = {};
   private contextEngine?: ContextEngine;
+  private dirtyStepClassifier?: Pick<DirtyStepClassifier, 'classify'>;
   /**
    * Tiered-memory budgeting layer (Chunk B1). Optional — when unset (or when
    * its internal memorySearch is unavailable) every consumer below degrades to
@@ -267,6 +269,43 @@ export class ProjectEngine {
 
   setContextEngine(engine: ContextEngine): void {
     this.contextEngine = engine;
+  }
+
+  /**
+   * Inject the M4 dirty-step classifier. Keeping it behind a narrow interface
+   * lets the project engine persist classification results without owning the
+   * ContextEngine or ContradictionDetector implementations.
+   */
+  setDirtyStepClassifier(classifier: Pick<DirtyStepClassifier, 'classify'>): void {
+    this.dirtyStepClassifier = classifier;
+  }
+
+  /**
+   * Classify downstream steps dirtied by an approved upstream version change.
+   * The caller supplies the immutable prior/current contents so this method
+   * can short-circuit cosmetic edits and keep the version boundary explicit.
+   */
+  async classifyDirtySteps(
+    projectId: string,
+    causeStepId: string,
+    previousCauseContent: string,
+    currentCauseContent: string,
+  ): Promise<DirtyStepClassification[]> {
+    const project = this.projects.get(projectId);
+    if (!project || !this.dirtyStepClassifier) return [];
+
+    const classifications = await this.dirtyStepClassifier.classify({
+      projectId,
+      steps: project.steps,
+      causeStepId,
+      previousCauseContent,
+      currentCauseContent,
+    });
+    if (classifications.length > 0) {
+      project.updatedAt = new Date().toISOString();
+      this.persistState();
+    }
+    return classifications;
   }
 
   /**

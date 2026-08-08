@@ -74,6 +74,7 @@ import { CraftCriticService } from './services/craft-critic.js';
 import { AudiobookPrepService } from './services/audiobook-prep.js';
 import { StyleCloneService } from './services/style-clone.js';
 import { ContradictionDetector } from './services/contradiction-detector.js';
+import { DirtyStepClassifier } from './services/dirty-step-classifier.js';
 import { CharacterAgentService } from './services/character-agent.js';
 import { RevisionOrchestrator } from './services/revision-orchestrator.js';
 import { LearningService } from './services/learning.js';
@@ -890,6 +891,12 @@ class AuthorAgentGateway {
     // Stateless (deps passed per-call), so a single instance is shared. Built
     // before the revision orchestrator so the continuity pass can use it.
     this.contradictionDetector = new ContradictionDetector();
+    this.projectEngine.setDirtyStepClassifier(new DirtyStepClassifier(
+      this.contextEngine,
+      this.contradictionDetector,
+      (request) => this.aiRouter.complete(request),
+      (taskType: string) => this.aiRouter.selectProvider(taskType),
+    ));
     logger.info('  ✓ Contradiction detector: active consistency checking (ConStory taxonomy) ready');
 
     // ── Character persona agents ──

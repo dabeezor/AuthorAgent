@@ -1,9 +1,13 @@
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DirtyStepClassifier,
   isCosmeticChange,
   severityFromReport,
 } from './dirty-step-classifier.js';
+import { ContradictionDetector } from './contradiction-detector.js';
+import { ContextEngine } from './context-engine.js';
 import type { ContradictionReport } from './contradiction-detector.js';
 import type { ProjectStep } from './project-templates.js';
 
@@ -76,39 +80,64 @@ describe('dirty-step severity classification', () => {
   });
 
   it('E2E: uses the existing entity DB and detector to mark a referenced economic-system contradiction high', async () => {
-    const chapter = dirtyStep('chapter-7', 'Mara paid the ferryman with three silver crowns.');
-    const entities = [{
-      name: 'Aster Economy',
-      type: 'rule' as const,
-      aliases: [],
-      description: 'Trade uses ledger credits; physical currency is forbidden.',
-      firstAppearance: 'world',
-      lastSeen: 'world',
-      attributes: { economicSystem: 'ledger credits only' },
-      changes: [{ chapterId: 'world', description: 'Changed from silver crowns to ledger credits.' }],
-    }];
-    const contextEngine = {
-      loadContext: vi.fn().mockResolvedValue({ projectId: 'novel', entities, summaries: [], updatedAt: '' }),
-    };
-    const detector = {
-      detect: vi.fn().mockResolvedValue(report('error')),
-    };
-    const classifier = new DirtyStepClassifier(contextEngine, detector, vi.fn(), vi.fn());
+    const workspace = await mkdtemp(tmpdir() + '/dirty-step-classifier-');
+    try {
+      const chapter = dirtyStep('chapter-7', 'Mara paid the ferryman with three silver crowns.');
+      const entities = [{
+        name: 'Aster Economy',
+        type: 'rule' as const,
+        aliases: [],
+        description: 'Trade uses ledger credits; physical currency is forbidden.',
+        firstAppearance: 'world',
+        lastSeen: 'world',
+        attributes: { economicSystem: 'ledger credits only' },
+        changes: [{ chapterId: 'world', description: 'Changed from silver crowns to ledger credits.' }],
+      }];
+      const contextEngine = new ContextEngine(workspace);
+      const context = await contextEngine.loadContext('novel');
+      context.entities.push(...entities);
+      await contextEngine.persistContext('novel');
 
-    const result = await classifier.classify({
-      projectId: 'novel',
-      steps: [chapter],
-      causeStepId: 'world',
-      previousCauseContent: 'The realm uses silver crowns.',
-      currentCauseContent: 'The realm uses ledger credits; coins are forbidden.',
-    });
+      const detector = new ContradictionDetector();
+      const aiComplete = vi.fn().mockResolvedValue({
+        text: JSON.stringify({
+          contradictions: [{
+            category: 'WORLD_RULE',
+            subtype: 'setting',
+            severity: 'error',
+            description: 'The chapter uses physical currency despite the established credit-only economy.',
+            chapterEvidence: 'three silver crowns',
+            priorEvidence: 'physical currency is forbidden',
+            entity: 'Aster Economy',
+            suggestion: 'Use ledger credits instead.',
+          }],
+        }),
+        tokensUsed: 1,
+        estimatedCost: 0,
+        provider: 'test',
+      });
+      const aiSelectProvider = vi.fn().mockReturnValue({ id: 'test' });
+      const classifier = new DirtyStepClassifier(
+        contextEngine,
+        detector,
+        aiComplete,
+        aiSelectProvider,
+      );
 
-    expect(result[0]).toEqual({ stepId: 'chapter-7', severity: 'high', contradictionCount: 1 });
-    expect(chapter.dirty?.severity).toBe('high');
-    expect(detector.detect).toHaveBeenCalledWith(
-      expect.objectContaining({ chapterId: 'chapter-7', chapterText: chapter.result, entities }),
-      expect.any(Function),
-      expect.any(Function),
-    );
+      const result = await classifier.classify({
+        projectId: 'novel',
+        steps: [chapter],
+        causeStepId: 'world',
+        previousCauseContent: 'The realm uses silver crowns.',
+        currentCauseContent: 'The realm uses ledger credits; coins are forbidden.',
+      });
+
+      expect(result[0]).toEqual({ stepId: 'chapter-7', severity: 'high', contradictionCount: 1 });
+      expect(chapter.dirty?.severity).toBe('high');
+      expect(aiComplete).toHaveBeenCalledOnce();
+      expect(aiSelectProvider).toHaveBeenCalledWith('consistency');
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 });

@@ -32,6 +32,26 @@ export interface ImpactResponse {
   dirty: { stepId: string; label: string; marker?: DirtyMarker }[];
 }
 
+export interface PatchHunk {
+  oldStart: number;
+  oldLines: string[];
+  newStart: number;
+  newLines: string[];
+}
+
+export interface PatchProposal {
+  id: string;
+  stepId: string;
+  parentV: number;
+  parentSha256: string;
+  proposedContent: string;
+  hunks: PatchHunk[];
+  instructions?: string;
+  mode?: 'patch' | 'regenerate';
+  createdAt: number;
+  status: 'pending' | 'accepted' | 'rejected' | 'superseded';
+}
+
 export interface ReviseResult {
   success: boolean;
   response?: string;
@@ -106,4 +126,33 @@ export function reviseStep(projectId: string, stepId: string, comments: string, 
 
 export function getImpact(projectId: string, stepId: string): Promise<ImpactResponse> {
   return request('GET', stepPath(projectId, stepId, '/impact'));
+}
+
+
+export function getPatchProposals(projectId: string, stepId: string): Promise<{ stepId: string; proposals: PatchProposal[] }> {
+  return request('GET', stepPath(projectId, stepId, '/patches'));
+}
+
+export function proposePatch(
+  projectId: string,
+  stepId: string,
+  instructions: string,
+  mode: 'patch' | 'regenerate' = 'patch',
+): Promise<{ proposal: PatchProposal }> {
+  return request('POST', stepPath(projectId, stepId, '/patches/propose'), { instructions, mode });
+}
+
+export function rejectPatch(projectId: string, stepId: string, patchId: string): Promise<{ proposal: PatchProposal }> {
+  return request('POST', stepPath(projectId, stepId, `/patches/${encodeURIComponent(patchId)}/reject`));
+}
+
+export function acceptPatch(
+  projectId: string,
+  stepId: string,
+  patchId: string,
+  editedContent?: string,
+): Promise<{ proposal: PatchProposal; version: number; step: unknown }> {
+  return request('POST', stepPath(projectId, stepId, `/patches/${encodeURIComponent(patchId)}/accept`), {
+    ...(editedContent !== undefined ? { editedContent } : {}),
+  });
 }

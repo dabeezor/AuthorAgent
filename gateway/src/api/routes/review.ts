@@ -15,6 +15,7 @@ import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
 import type { ApiContext } from '../context.js';
 import { docVersionService } from '../../services/doc-versions.js';
+import { autoPatchService } from '../../services/auto-patches.js';
 import { computeTransitiveDependents } from '../../services/dependency-graph.js';
 import { addComment, listComments, setCommentStatus, CommentValidationError } from '../../services/comments.js';
 import type { Project, ProjectStep } from '../../services/project-templates.js';
@@ -203,6 +204,114 @@ export function registerReviewRoutes(ctx: ApiContext): void {
   });
 
   // ═══════════════════════════════════════════════════════════
+  // Auto-patch proposals (M4.2)
+  // ═══════════════════════════════════════════════════════════
+
+  function patchGenerator(instructions: string, mode: 'patch' | 'regenerate') {
+    const router = ctx.services?.aiRouter;
+    if (!router?.selectProvider || !router?.complete) throw new Error('AI router is not initialized');
+    return async (parentContent: string): Promise<string> => {
+      const selected = router.selectProvider('revision');
+      const provider = typeof selected === 'string' ? selected : selected?.id;
+      if (!provider) throw new Error('No revision provider is available');
+      const system = mode === 'patch'
+        ? 'You are an editorial patch generator. Apply only the requested, local changes to the supplied document. Preserve all untouched text, headings, formatting, and document boundaries. Return the complete updated document and nothing else. Do not explain the changes, add a preamble, or regenerate unrelated sections.'
+        : 'You are an editorial document generator. Return a complete replacement document for the supplied document and request. Return only the document, with no explanation or preamble.';
+      const response = await router.complete({
+        provider,
+        system,
+        messages: [{ role: 'user', content: `REQUEST:\n${instructions}\n\nCURRENT DOCUMENT:\n${parentContent}\n\nReturn the ${mode === 'patch' ? 'targeted updated' : 'complete replacement'} document now.` }],
+        maxTokens: 16384,
+        temperature: 0.2,
+      });
+      return String(response?.text || '').trim();
+    };
+  }
+
+  app.get('/api/projects/:id/steps/:stepId/patches', async (req: Request, res: Response) => {
+    const engine = getEngine(res);
+    if (!engine) return;
+    const project: Project | undefined = engine.getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const step = findStep(project, req.params.stepId);
+    if (!step) return res.status(404).json({ error: 'Step not found' });
+    const projectDir = projectDirFor(workspaceDir, project);
+    res.json({ stepId: step.id, proposals: await autoPatchService.list(projectDir, step.id) });
+  });
+
+  app.post('/api/projects/:id/steps/:stepId/patches/propose', async (req: Request, res: Response) => {
+    const engine = getEngine(res);
+    if (!engine) return;
+    const project: Project | undefined = engine.getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const step = findStep(project, req.params.stepId);
+    if (!step) return res.status(404).json({ error: 'Step not found' });
+
+    const { comments, notes, instructions, mode = 'patch' } = req.body || {};
+    if (mode !== 'patch' && mode !== 'regenerate') return res.status(400).json({ error: 'mode must be "patch" or "regenerate"' });
+    const request = [instructions, comments, notes].filter((value) => typeof value === 'string' && value.trim()).join('\n\n');
+    if (!request) return res.status(400).json({ error: 'instructions, comments, and/or notes (string) required' });
+
+    const projectDir = projectDirFor(workspaceDir, project);
+    const canonicalPath = join(projectDir, stepFileNameFor(step));
+    if (!existsSync(canonicalPath)) return res.status(400).json({ error: 'Step has no document content to patch' });
+    // Ensure the generator always binds to the current immutable parent.
+    await docVersionService.getVersions(projectDir, step.id, canonicalPath);
+    try {
+      const proposal = await autoPatchService.propose(projectDir, step.id, patchGenerator(request, mode), { instructions: request, mode });
+      res.json({ proposal });
+    } catch (error) {
+      res.status(502).json({ error: `Patch proposal failed: ${String(error)}` });
+    }
+  });
+
+  app.post('/api/projects/:id/steps/:stepId/patches/:patchId/reject', async (req: Request, res: Response) => {
+    const engine = getEngine(res);
+    if (!engine) return;
+    const project: Project | undefined = engine.getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const step = findStep(project, req.params.stepId);
+    if (!step) return res.status(404).json({ error: 'Step not found' });
+    const proposal = await autoPatchService.reject(projectDirFor(workspaceDir, project), step.id, String(req.params.patchId));
+    if (!proposal) return res.status(404).json({ error: 'Patch proposal not found' });
+    res.json({ proposal });
+  });
+
+  app.post('/api/projects/:id/steps/:stepId/patches/:patchId/accept', async (req: Request, res: Response) => {
+    const engine = getEngine(res);
+    if (!engine) return;
+    const project: Project | undefined = engine.getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const step = findStep(project, req.params.stepId);
+    if (!step) return res.status(404).json({ error: 'Step not found' });
+
+    const projectDir = projectDirFor(workspaceDir, project);
+    const existing = (await autoPatchService.list(projectDir, step.id)).find((item) => item.id === req.params.patchId && item.status === 'pending');
+    if (!existing) return res.status(404).json({ error: 'Patch proposal not found' });
+    const editedContent = typeof req.body?.editedContent === 'string' ? req.body.editedContent : undefined;
+    try {
+      const result = await autoPatchService.accept(
+        projectDir,
+        step.id,
+        String(req.params.patchId),
+        editedContent,
+        patchGenerator(existing.instructions || 'Reapply the proposed editorial patch to the current document.', existing.mode || 'patch'),
+      );
+      if (result.kind === 'stale') {
+        return res.status(409).json({ error: 'Patch parent changed; proposal was recomputed and was not applied.', stale: true, proposal: result.proposal });
+      }
+      if (result.kind === 'missing') return res.status(404).json({ error: 'Patch proposal not found' });
+      await (await import('fs/promises')).writeFile(join(projectDir, stepFileNameFor(step)), result.content, 'utf-8');
+      existing.status = 'accepted';
+      const updated = engine.saveStepResult(project.id, step.id, result.content);
+      engine.markStepClean(project.id, step.id);
+      res.json({ proposal: existing, version: result.version, step: updated });
+    } catch (error) {
+      res.status(409).json({ error: `Patch acceptance failed: ${String(error)}` });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════
   // Comments (M2.3 — ALP-1565, section + span anchoring)
   // ═══════════════════════════════════════════════════════════
 
@@ -305,8 +414,24 @@ export function registerReviewRoutes(ctx: ApiContext): void {
 
     const projectDir = projectDirFor(workspaceDir, project);
     const currentVersion = await docVersionService.getCurrentVersion(projectDir, step.id);
+    const previousVersion = step.gate?.decidedVersion;
+    const [previousContent, currentContent] = await Promise.all([
+      typeof previousVersion === 'number'
+        ? docVersionService.getVersionContent(projectDir, step.id, previousVersion)
+        : Promise.resolve(null),
+      currentVersion > 0
+        ? docVersionService.getVersionContent(projectDir, step.id, currentVersion)
+        : Promise.resolve(null),
+    ]);
     const decided = engine.decideStepGate(project.id, step.id, 'approved', currentVersion);
-    res.json({ step: decided, project: engine.getProject(project.id) });
+    const dirtyClassifications = decided &&
+      typeof previousVersion === 'number' &&
+      currentVersion > previousVersion &&
+      previousContent !== null &&
+      currentContent !== null
+      ? await engine.classifyDirtySteps(project.id, step.id, previousContent, currentContent)
+      : [];
+    res.json({ step: decided, project: engine.getProject(project.id), dirtyClassifications });
   });
 
   app.post('/api/projects/:id/steps/:stepId/revise', async (req: Request, res: Response) => {
