@@ -8,6 +8,7 @@ import type { ApiContext } from '../context.js';
 import multer from 'multer';
 import { generateDocxBuffer } from '../../services/docx-export.js';
 import { generateEpubBuffer } from '../../services/epub-export.js';
+import { readDocxXmlEntry } from '../../security/docx-archive.js';
 import { safePath, upload } from '../context.js';
 
 export function registerDocumentRoutes(ctx: ApiContext): void {
@@ -112,9 +113,9 @@ export function registerDocumentRoutes(ctx: ApiContext): void {
       try {
         const AdmZip = (await import('adm-zip')).default;
         const zip = new AdmZip(req.file.buffer);
-        const docEntry = zip.getEntry('word/document.xml');
-        if (docEntry) {
-          const xml = docEntry.getData().toString('utf-8');
+        const documentXml = readDocxXmlEntry(zip, 'word/document.xml');
+        if (documentXml) {
+          const xml = documentXml.toString('utf-8');
           const paragraphs: string[] = [];
           const paraMatches = xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [];
           for (const para of paraMatches) {
@@ -243,9 +244,9 @@ export function registerDocumentRoutes(ctx: ApiContext): void {
       try {
         const AdmZip = (await import('adm-zip')).default;
         const zip = new AdmZip(req.file.buffer);
-        const docEntry = zip.getEntry('word/document.xml');
-        if (docEntry) {
-          const xml = docEntry.getData().toString('utf-8');
+        const documentXml = readDocxXmlEntry(zip, 'word/document.xml');
+        if (documentXml) {
+          const xml = documentXml.toString('utf-8');
           // Extract text from <w:t> tags, preserving paragraph breaks
           const paragraphs: string[] = [];
           const paraMatches = xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [];

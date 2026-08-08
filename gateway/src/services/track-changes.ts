@@ -15,6 +15,7 @@
  */
 
 import AdmZip from 'adm-zip';
+import { readDocxXmlEntry } from '../security/docx-archive.js';
 
 export type ChangeType = 'insert' | 'delete' | 'formatting' | 'comment';
 export type ChangeStatus = 'pending' | 'accepted' | 'rejected';
@@ -46,14 +47,13 @@ export class TrackChangesService {
    */
   parseDocx(buffer: Buffer): TrackChangesReport {
     const zip = new AdmZip(buffer);
-    const documentEntry = zip.getEntry('word/document.xml');
-    if (!documentEntry) {
+    const documentXml = readDocxXmlEntry(zip, 'word/document.xml');
+    if (!documentXml) {
       throw new Error('Invalid .docx: word/document.xml not found');
     }
-    const xml = documentEntry.getData().toString('utf-8');
+    const xml = documentXml.toString('utf-8');
 
-    const commentsEntry = zip.getEntry('word/comments.xml');
-    const commentsXml = commentsEntry?.getData().toString('utf-8');
+    const commentsXml = readDocxXmlEntry(zip, 'word/comments.xml')?.toString('utf-8');
 
     const changes: TrackedChange[] = [];
     const authors = new Set<string>();
@@ -169,9 +169,9 @@ export class TrackChangesService {
    */
   applyDecisions(buffer: Buffer, decisions: Map<string, ChangeStatus>): string {
     const zip = new AdmZip(buffer);
-    const documentEntry = zip.getEntry('word/document.xml');
-    if (!documentEntry) throw new Error('Invalid .docx: word/document.xml not found');
-    const xml = documentEntry.getData().toString('utf-8');
+    const documentXml = readDocxXmlEntry(zip, 'word/document.xml');
+    if (!documentXml) throw new Error('Invalid .docx: word/document.xml not found');
+    const xml = documentXml.toString('utf-8');
 
     // Re-parse to get IDs in the same order we generated them.
     const report = this.parseDocx(buffer);
