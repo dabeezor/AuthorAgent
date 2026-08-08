@@ -59,6 +59,10 @@ export class DirtyStepClassifier {
     private readonly aiSelectProvider: AISelectProviderFn,
   ) {}
 
+  /**
+   * Classify all downstream steps whose dirty marker points to the changed source.
+   * Cosmetic source changes are resolved without loading context or calling AI.
+   */
   async classify(input: ClassifyDirtyStepsInput): Promise<DirtyStepClassification[]> {
     const dirtySteps = input.steps.filter(
       (step) => step.dirty?.causeStepId === input.causeStepId,
