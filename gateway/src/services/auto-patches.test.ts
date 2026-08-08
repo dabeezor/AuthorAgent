@@ -44,4 +44,19 @@ describe('AutoPatchService', () => {
     await service.accept(dir, 'chapter', proposal.id, 'human edit');
     expect(await docVersionService.getVersionContent(dir, 'chapter', 2)).toBe('human edit');
   });
+
+  it('stores reviewable hunk boundaries and recomputes a stale proposal', async () => {
+    const dir = await setup(); const service = new AutoPatchService();
+    const proposal = await service.propose(dir, 'chapter', async () => 'old text\nnew line');
+    expect(proposal.hunks).toEqual([{ oldStart: 2, oldLines: [], newStart: 2, newLines: ['new line'] }]);
+
+    await docVersionService.appendVersion(dir, 'chapter', 'new parent', 'user');
+    const result = await service.accept(dir, 'chapter', proposal.id, undefined, async (parent) => `${parent}\nrecomputed`);
+    expect(result).toMatchObject({ kind: 'stale', recomputed: true });
+    if (result.kind === 'stale') {
+      expect(result.proposal.parentV).toBe(2);
+      expect(result.proposal.proposedContent).toBe('new parent\nrecomputed');
+    }
+    expect(await docVersionService.getCurrentVersion(dir, 'chapter')).toBe(2);
+  });
 });

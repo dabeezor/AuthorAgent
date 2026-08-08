@@ -12,6 +12,7 @@ const VERSIONS = [
 ];
 
 function stubHappyPath() {
+  vi.spyOn(reviewApi, 'getPatchProposals').mockResolvedValue({ stepId: 's1', proposals: [] });
   vi.spyOn(reviewApi, 'getVersions').mockResolvedValue({ stepId: 's1', versions: VERSIONS });
   vi.spyOn(reviewApi, 'getImpact').mockResolvedValue({ stepId: 's1', downstreamStepIds: ['s2'], dirty: [] });
   vi.spyOn(reviewApi, 'getVersionContent').mockImplementation(async (_p, _s, v) => ({
@@ -38,6 +39,7 @@ describe('ReviewSurface', () => {
   it('shows an error and a retry option when the initial load fails', async () => {
     vi.spyOn(reviewApi, 'getVersions').mockRejectedValue(new Error('network down'));
     vi.spyOn(reviewApi, 'getImpact').mockResolvedValue({ stepId: 's1', downstreamStepIds: [], dirty: [] });
+    vi.spyOn(reviewApi, 'getPatchProposals').mockResolvedValue({ stepId: 's1', proposals: [] });
 
     render(<ReviewSurface projectId="p1" stepId="s1" onClose={() => {}} />);
 
@@ -111,9 +113,10 @@ describe('ReviewSurface', () => {
     expect(await screen.findByText('Step is "completed", not awaiting_review')).toBeTruthy();
   });
 
-  it('sends comments to the agent via Ask agent to revise and reloads on success', async () => {
+  it('proposes a targeted patch without applying it', async () => {
     stubHappyPath();
-    const reviseSpy = vi.spyOn(reviewApi, 'reviseStep').mockResolvedValue({ success: true, response: 'ok', version: 3 });
+    const proposal = { id: 'patch-1', stepId: 's1', parentV: 2, parentSha256: 'b', proposedContent: 'patched', hunks: [{ oldStart: 1, oldLines: ['old'], newStart: 1, newLines: ['new'] }], createdAt: 3000, status: 'pending' as const };
+    const proposeSpy = vi.spyOn(reviewApi, 'proposePatch').mockResolvedValue({ proposal });
 
     render(<ReviewSurface projectId="p1" stepId="s1" onClose={() => {}} />);
     await screen.findByTestId('review-editor');
@@ -122,13 +125,12 @@ describe('ReviewSurface', () => {
     fireEvent.input(screen.getByTestId('revise-comments'), { target: { value: 'Tighten the pacing here.' } });
     fireEvent.click(screen.getByTestId('revise-submit'));
 
-    await waitFor(() => expect(reviseSpy).toHaveBeenCalledWith('p1', 's1', 'Tighten the pacing here.', ''));
-    expect(await screen.findByText('Agent revised the document (v3).')).toBeTruthy();
+    await waitFor(() => expect(proposeSpy).toHaveBeenCalledWith('p1', 's1', 'Tighten the pacing here.', 'patch'));
   });
 
-  it('blocks Ask agent to revise submission when both comments and notes are empty', async () => {
+  it('blocks patch proposal submission when both comments and notes are empty', async () => {
     stubHappyPath();
-    const reviseSpy = vi.spyOn(reviewApi, 'reviseStep');
+    const proposeSpy = vi.spyOn(reviewApi, 'proposePatch');
 
     render(<ReviewSurface projectId="p1" stepId="s1" onClose={() => {}} />);
     await screen.findByTestId('review-editor');
@@ -137,7 +139,23 @@ describe('ReviewSurface', () => {
     fireEvent.click(screen.getByTestId('revise-submit'));
 
     expect(await screen.findByText(/Add a comment or a note/)).toBeTruthy();
-    expect(reviseSpy).not.toHaveBeenCalled();
+    expect(proposeSpy).not.toHaveBeenCalled();
+  });
+
+  it('allows editing and accepting a pending patch', async () => {
+    const proposal = { id: 'patch-1', stepId: 's1', parentV: 2, parentSha256: 'b', proposedContent: 'patched content', hunks: [{ oldStart: 1, oldLines: ['old'], newStart: 1, newLines: ['patched'] }], createdAt: 3000, status: 'pending' as const };
+    vi.spyOn(reviewApi, 'getVersions').mockResolvedValue({ stepId: 's1', versions: VERSIONS });
+    vi.spyOn(reviewApi, 'getImpact').mockResolvedValue({ stepId: 's1', downstreamStepIds: [], dirty: [] });
+    vi.spyOn(reviewApi, 'getPatchProposals').mockResolvedValue({ stepId: 's1', proposals: [proposal] });
+    vi.spyOn(reviewApi, 'getVersionContent').mockResolvedValue({ stepId: 's1', v: 2, content: 'content v2' });
+    const acceptSpy = vi.spyOn(reviewApi, 'acceptPatch').mockResolvedValue({ proposal, version: 3, step: {} });
+
+    render(<ReviewSurface projectId="p1" stepId="s1" onClose={() => {}} />);
+    const patchEditor = await screen.findByTestId('patch-editor-patch-1');
+    fireEvent.input(patchEditor, { target: { value: 'human-edited patch' } });
+    fireEvent.click(screen.getByTestId('patch-accept-patch-1'));
+
+    await waitFor(() => expect(acceptSpy).toHaveBeenCalledWith('p1', 's1', 'patch-1', 'human-edited patch'));
   });
 
   it('calls onClose when Close is clicked', async () => {

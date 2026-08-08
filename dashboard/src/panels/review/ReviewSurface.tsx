@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import * as reviewApi from '../../api/review';
-import type { DiffOp, ImpactResponse, VersionEntry } from '../../api/review';
+import type { DiffOp, ImpactResponse, PatchProposal, VersionEntry } from '../../api/review';
 import { DiffView } from './DiffView';
 
 export interface ReviewSurfaceProps {
@@ -32,6 +32,8 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [impact, setImpact] = useState<ImpactResponse | null>(null);
+  const [patches, setPatches] = useState<PatchProposal[]>([]);
+  const [patchDrafts, setPatchDrafts] = useState<Record<string, string>>({});
   const [editedContent, setEditedContent] = useState('');
   const [savedContent, setSavedContent] = useState('');
   const [loadedVersion, setLoadedVersion] = useState<number | null>(null);
@@ -53,12 +55,16 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
     setLoadState('loading');
     setMessage(null);
     try {
-      const [versionsRes, impactRes] = await Promise.all([
+      const [versionsRes, impactRes, patchRes] = await Promise.all([
         reviewApi.getVersions(projectId, stepId),
         reviewApi.getImpact(projectId, stepId),
+        reviewApi.getPatchProposals(projectId, stepId),
       ]);
       setVersions(versionsRes.versions);
       setImpact(impactRes);
+      const pendingPatches = patchRes.proposals.filter((proposal) => proposal.status === 'pending');
+      setPatches(pendingPatches);
+      setPatchDrafts(Object.fromEntries(pendingPatches.map((proposal) => [proposal.id, proposal.proposedContent])));
 
       const latest = versionsRes.versions[versionsRes.versions.length - 1];
       if (latest) {
@@ -131,26 +137,69 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
     }
   }
 
-  async function handleRevise() {
+  async function handlePropose(mode: 'patch' | 'regenerate' = 'patch') {
     if (!reviseComments.trim() && !reviseNotes.trim()) {
-      setMessage({ kind: 'error', text: 'Add a comment or a note before asking the agent to revise.' });
+      setMessage({ kind: 'error', text: 'Add a comment or a note before proposing a patch.' });
       return;
     }
-    setBusy('revise');
+    setBusy(mode);
     setMessage(null);
     try {
-      const result = await reviewApi.reviseStep(projectId, stepId, reviseComments, reviseNotes);
-      if (result.success) {
-        setRevisePanelOpen(false);
-        setReviseComments('');
-        setReviseNotes('');
-        // loadAll() clears any existing message as it starts, so the success
-        // message must be set after it resolves, not before.
-        await loadAll();
-        setMessage({ kind: 'success', text: `Agent revised the document (v${result.version}).` });
-      } else {
-        setMessage({ kind: 'error', text: result.error || 'Revision failed.' });
+      const instructions = [reviseComments, reviseNotes].filter((value) => value.trim()).join('\n\n');
+      const result = await reviewApi.proposePatch(projectId, stepId, instructions, mode);
+      setRevisePanelOpen(false);
+      setReviseComments('');
+      setReviseNotes('');
+      await loadAll();
+      setMessage({ kind: 'success', text: mode === 'patch' ? `Patch proposed (${result.proposal.hunks.length} hunk${result.proposal.hunks.length === 1 ? '' : 's'}).` : 'Full-regeneration proposal created for review.' });
+    } catch (err) {
+      setMessage({ kind: 'error', text: (err as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleAcceptPatch(proposal: PatchProposal) {
+    setBusy(`accept-${proposal.id}`);
+    setMessage(null);
+    try {
+      const result = await reviewApi.acceptPatch(projectId, stepId, proposal.id, patchDrafts[proposal.id]);
+      await loadAll();
+      setMessage({ kind: 'success', text: `Accepted patch as v${result.version}.` });
+    } catch (err) {
+      await loadAll();
+      setMessage({ kind: 'error', text: (err as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleAcceptAll() {
+    setBusy('accept-all');
+    setMessage(null);
+    try {
+      let accepted = 0;
+      for (const proposal of patches) {
+        await reviewApi.acceptPatch(projectId, stepId, proposal.id, patchDrafts[proposal.id]);
+        accepted++;
       }
+      await loadAll();
+      setMessage({ kind: 'success', text: `Accepted ${accepted} patch${accepted === 1 ? '' : 'es'}.` });
+    } catch (err) {
+      await loadAll();
+      setMessage({ kind: 'error', text: (err as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleRejectPatch(proposal: PatchProposal) {
+    setBusy(`reject-${proposal.id}`);
+    setMessage(null);
+    try {
+      await reviewApi.rejectPatch(projectId, stepId, proposal.id);
+      await loadAll();
+      setMessage({ kind: 'success', text: 'Patch rejected.' });
     } catch (err) {
       setMessage({ kind: 'error', text: (err as Error).message });
     } finally {
@@ -290,6 +339,45 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
               ))}
             </section>
 
+            <section style={{ marginTop: '1.5em' }} data-testid="patches-section">
+              <h4 style={{ margin: '0 0 0.5em' }}>Proposed patches</h4>
+              {patches.length === 0 && <p style={{ color: 'var(--text-secondary)', fontSize: '0.85em' }}>No pending patches.</p>}
+              {patches.length > 0 && (
+                <>
+                  <button type="button" disabled={busy != null} onClick={handleAcceptAll} data-testid="patch-accept-all">
+                    {busy === 'accept-all' ? 'Accepting…' : `Accept all (${patches.length})`}
+                  </button>
+                  {patches.map((proposal) => (
+                    <div key={proposal.id} data-testid={`patch-${proposal.id}`} style={{ marginTop: '0.75em', border: '1px solid var(--bg-secondary)', padding: '0.5em' }}>
+                      <div style={{ fontSize: '0.8em', color: 'var(--text-secondary)' }}>
+                        Parent v{proposal.parentV} · {proposal.hunks?.length || 0} hunk{proposal.hunks?.length === 1 ? '' : 's'}{proposal.mode === 'regenerate' ? ' · full regeneration' : ''}
+                      </div>
+                      {(proposal.hunks || []).map((hunk, index) => (
+                        <pre key={index} style={{ fontSize: '0.75em', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                          {hunk.oldLines.map((line) => `- ${line}\n`).join('')}{hunk.newLines.map((line) => `+ ${line}\n`).join('')}
+                        </pre>
+                      ))}
+                      <textarea
+                        aria-label={`Edit patch ${proposal.id}`}
+                        data-testid={`patch-editor-${proposal.id}`}
+                        value={patchDrafts[proposal.id] ?? proposal.proposedContent}
+                        onInput={(event) => setPatchDrafts((drafts) => ({ ...drafts, [proposal.id]: (event.target as HTMLTextAreaElement).value }))}
+                        style={{ width: '100%', minHeight: '6em', fontFamily: 'monospace' }}
+                      />
+                      <div style={{ display: 'flex', gap: '0.4em', marginTop: '0.4em' }}>
+                        <button type="button" disabled={busy != null} onClick={() => handleAcceptPatch(proposal)} data-testid={`patch-accept-${proposal.id}`}>
+                          {busy === `accept-${proposal.id}` ? 'Accepting…' : 'Accept'}
+                        </button>
+                        <button type="button" disabled={busy != null} onClick={() => handleRejectPatch(proposal)} data-testid={`patch-reject-${proposal.id}`}>
+                          {busy === `reject-${proposal.id}` ? 'Rejecting…' : 'Reject'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </section>
+
             <section style={{ marginTop: '1.5em' }}>
               <h4 style={{ margin: '0 0 0.5em' }}>Versions</h4>
               <ul style={{ listStyle: 'none', margin: 0, padding: 0 }} data-testid="version-list">
@@ -384,7 +472,7 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
             onClick={() => setRevisePanelOpen((v) => !v)}
             data-testid="review-revise-toggle"
           >
-            Ask agent to revise
+            Propose patch
           </button>
 
           {revisePanelOpen && (
@@ -403,8 +491,11 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
                 onInput={(e) => setReviseNotes((e.target as HTMLTextAreaElement).value)}
                 style={{ width: '100%', minHeight: '3em' }}
               />
-              <button type="button" disabled={busy != null} onClick={handleRevise} data-testid="revise-submit">
-                {busy === 'revise' ? 'Revising…' : 'Send to agent'}
+              <button type="button" disabled={busy != null} onClick={() => handlePropose('patch')} data-testid="revise-submit">
+                {busy === 'patch' ? 'Proposing…' : 'Propose patch'}
+              </button>
+              <button type="button" disabled={busy != null} onClick={() => handlePropose('regenerate')} data-testid="patch-regenerate">
+                {busy === 'regenerate' ? 'Generating proposal…' : 'Propose full regeneration'}
               </button>
             </div>
           )}
