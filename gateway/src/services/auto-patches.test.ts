@@ -59,4 +59,18 @@ describe('AutoPatchService', () => {
     }
     expect(await docVersionService.getCurrentVersion(dir, 'chapter')).toBe(2);
   });
+
+  it('serializes concurrent acceptance so a proposal creates at most one version', async () => {
+    const dir = await setup(); const service = new AutoPatchService();
+    const proposal = await service.propose(dir, 'chapter', async () => 'patched text');
+
+    const results = await Promise.all([
+      service.accept(dir, 'chapter', proposal.id),
+      service.accept(dir, 'chapter', proposal.id),
+    ]);
+
+    expect(results.filter((result) => result.kind === 'accepted')).toHaveLength(1);
+    expect(results.filter((result) => result.kind === 'missing')).toHaveLength(1);
+    expect(await docVersionService.getCurrentVersion(dir, 'chapter')).toBe(2);
+  });
 });

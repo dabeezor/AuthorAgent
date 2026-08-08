@@ -71,6 +71,7 @@ export function computePatchHunks(fromText: string, toText: string): PatchHunk[]
 }
 
 export class AutoPatchService {
+  private readonly accepting = new Set<string>();
   private path(projectDir: string, stepId: string) {
     return join(projectDir, '.patches', `${stepId}.json`);
   }
@@ -103,7 +104,7 @@ export class AutoPatchService {
 
   async reject(projectDir: string, stepId: string, id: string): Promise<PatchProposal | null> {
     const proposals = await this.list(projectDir, stepId);
-    const proposal = proposals.find((item) => item.id === id);
+    const proposal = proposals.find((item) => item.id === id && item.status === 'pending');
     if (!proposal) return null;
     proposal.status = 'rejected';
     await this.write(projectDir, stepId, proposals);
@@ -111,6 +112,17 @@ export class AutoPatchService {
   }
 
   async accept(projectDir: string, stepId: string, id: string, editedContent?: string, recompute?: PatchGenerator): Promise<
+    | { kind: 'accepted'; version: number; content: string }
+    | { kind: 'stale'; proposal: PatchProposal; recomputed: boolean }
+    | { kind: 'missing' }
+  > {
+    const key = [projectDir, stepId, id].join('\0');
+    if (this.accepting.has(key)) return { kind: 'missing' };
+    this.accepting.add(key);
+    return this.acceptPending(projectDir, stepId, id, editedContent, recompute).finally(() => this.accepting.delete(key));
+  }
+
+  private async acceptPending(projectDir: string, stepId: string, id: string, editedContent?: string, recompute?: PatchGenerator): Promise<
     | { kind: 'accepted'; version: number; content: string }
     | { kind: 'stale'; proposal: PatchProposal; recomputed: boolean }
     | { kind: 'missing' }
