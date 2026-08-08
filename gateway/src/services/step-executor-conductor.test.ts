@@ -32,6 +32,8 @@ import {
   type Project,
   type ProjectStep,
 } from './project-templates.js';
+import { addComment } from './comments.js';
+import { docVersionService } from './doc-versions.js';
 
 // ═══════════════════════════════════════════════════════════
 // Harness
@@ -643,5 +645,73 @@ describe('executeStepWithRetry — gate check (ALP-1610)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// 4. reviseStep — gated review loop (ALP-6)
+//
+// Proves the on-demand revise path remains self-contained: it sends the
+// current immutable version, freeform feedback, and anchored open comments
+// through the injected MessagePipeline-compatible handler, then persists an
+// agent-authored version and reopens the gate.
+// ═══════════════════════════════════════════════════════════
+
+describe('reviseStep — gated review loop (ALP-6)', () => {
+  it('passes current text, feedback, and open anchored comments to the pipeline and appends an agent version', async () => {
+    const project = makeProject('revise-test', [{
+      id: 'S1',
+      label: 'Review draft',
+      phase: 'premise',
+      gateEnabled: true,
+      status: 'awaiting_review',
+      prompt: 'Draft the reviewed passage.',
+    }]);
+    const step = project.steps[0];
+    const originalPrompt = step.prompt;
+    const projectDir = join(workspaceDir, 'projects', 'test-revise-test');
+    const previousContent = '# Review draft\n\n## Opening\n\nThe old opening.';
+    await docVersionService.appendVersion(projectDir, step.id, previousContent, 'agent');
+    await addComment(projectDir, step.id, previousContent, {
+      type: 'span',
+      sectionId: 'opening',
+      quote: 'The old opening.',
+      prefixContext: '',
+      suffixContext: '',
+      body: 'Make this opening more immediate.',
+    });
+
+    let pipelineMessage = '';
+    const revisedResponse = 'The revised opening is immediate and grounded in action. ' + 'word '.repeat(20);
+    const handler: MessageHandler = async (content, _channel, respond) => {
+      pipelineMessage = content;
+      respond(revisedResponse);
+    };
+    const engine = makeEngine(project);
+    const exec = new StepExecutor(engine, makeDeps(handler));
+
+    const result = await exec.reviseStep(
+      project.id,
+      step.id,
+      'Tighten the opening.\n\nAuthor note: keep the tense urgent.',
+      workspaceDir,
+    );
+
+    expect(result).toMatchObject({ ok: true, version: 2, response: revisedResponse });
+    expect(pipelineMessage).toContain(previousContent);
+    expect(pipelineMessage).toContain('Tighten the opening.');
+    expect(pipelineMessage).toContain('Author note: keep the tense urgent.');
+    expect(pipelineMessage).toContain('The old opening.');
+    expect(pipelineMessage).toContain('Make this opening more immediate.');
+    expect(step.prompt).toBe(originalPrompt);
+    expect(step.status).toBe('awaiting_review');
+
+    const versions = await docVersionService.getVersions(projectDir, step.id);
+    expect(versions).toHaveLength(2);
+    expect(versions[1]).toMatchObject({ author: 'agent', parentV: 1 });
+    expect(versions[1].author).not.toBe('agent-patch');
+    const currentContent = await docVersionService.getVersionContent(projectDir, step.id, 2);
+    expect(currentContent).toContain(revisedResponse);
+    expect(currentContent).not.toBe(previousContent);
   });
 });
