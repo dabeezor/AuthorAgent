@@ -1056,6 +1056,11 @@ export class AIRouter {
   /** Writes the system prompt to a unique scratch file for --system-prompt-file.
    *  Mode 0o600, never logged (only its length is — see runClaudeCliOnce). */
   private async writeSystemPromptFile(content: string): Promise<string> {
+    // initialize() normally prepares these directories, but this method is
+    // also reached by direct/reinitialized calls. Keep the write path safe if
+    // the process starts before initialization or a prior cleanup removed it.
+    await mkdir(CLAUDE_CLI_SCRATCH_DIR, { recursive: true });
+    await mkdir(CLAUDE_CLI_CWD_DIR, { recursive: true });
     const path = join(CLAUDE_CLI_SCRATCH_DIR, `${process.pid}-${Date.now()}-${randomUUID()}.txt`);
     await writeFile(path, content, { encoding: 'utf8', mode: 0o600 });
     return path;
