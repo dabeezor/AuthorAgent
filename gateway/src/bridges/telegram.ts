@@ -24,6 +24,7 @@ interface CommandHandlers {
   research: (query: string) => Promise<{ results: string; error?: string }>;
   listFiles: (subdir?: string) => Promise<string[]>;
   readFile: (filename: string) => Promise<{ content: string; error?: string }>;
+  addNote: (text: string) => Promise<{ id: string; timestamp: string }>;
 }
 
 export class TelegramBridge {
@@ -129,6 +130,7 @@ export class TelegramBridge {
         `/novel [idea] — Start a full novel pipeline\n` +
         `/project [task] — Plan & auto-execute any task\n` +
         `/write [idea] — Quick writing task\n` +
+        `/note [text] — Jot a story note for later\n` +
         `/projects — List all projects\n` +
         `/status — Project status\n` +
         `/stop — Stop/pause active project\n` +
@@ -192,6 +194,24 @@ export class TelegramBridge {
           });
         } catch (e) {
           await this.sendMessage(chatId, `❌ Error: ${String(e)}`);
+        }
+      }
+      return;
+    }
+
+    // ── /note — Jot a freeform story note, no project created ──
+    if (text.startsWith('/note')) {
+      const note = text.replace(/^\/note\s*/, '').trim();
+      if (!note) {
+        await this.sendMessage(chatId, `What's the note? Try:\n/note the aunt should know about the letter before ch.9`);
+        return;
+      }
+      if (this.commandHandlers) {
+        try {
+          const { id } = await this.commandHandlers.addNote(note);
+          await this.sendMessage(chatId, `📌 Noted (${id}).`);
+        } catch (e) {
+          await this.sendMessage(chatId, `❌ ${String(e)}`);
         }
       }
       return;

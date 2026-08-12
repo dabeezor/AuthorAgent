@@ -407,6 +407,8 @@ class AuthorAgentGateway {
     if (this.memorySearch.isAvailable()) {
       // Wire memory.process() → live FTS indexing
       this.memory.setLiveIndexHook((entry) => this.memorySearch.indexConversationTurn(entry));
+      // Wire memory.addNote() → live FTS indexing
+      this.memory.setNoteIndexHook((entry) => this.memorySearch.indexNote(entry));
       // Index any pre-existing data on first boot — incremental on subsequent.
       try {
         const result = await this.memorySearch.reindexAll();
@@ -1519,6 +1521,9 @@ class AuthorAgentGateway {
           '`/stop` — Pause active project',
           '`continue` — Resume paused project',
           '',
+          '🗒️ **Notes**',
+          '`/note [text]` — Jot a story note for later, no project created',
+          '',
           '📁 **Files & Export**',
           '`/files [folder]` — List project files (numbered)',
           '`/read [# or name]` — Preview a file',
@@ -1567,6 +1572,16 @@ class AuthorAgentGateway {
           return `Writing project created: **"${args}"** (${result.steps} steps)\n\nGo to **Projects** to start execution.`;
         } catch (err) {
           return `Error: ${String(err)}`;
+        }
+      }
+
+      case '/note': {
+        if (!args) return 'Usage: `/note [your story note]`\nExample: `/note the aunt should know about the letter before ch.9`';
+        try {
+          const { id } = await this.memory.addNote(args);
+          return `Noted (${id}). Find it later with memory search, filtered to notes.`;
+        } catch (err) {
+          return `Error saving note: ${String(err)}`;
         }
       }
 
@@ -2641,6 +2656,10 @@ class AuthorAgentGateway {
         } catch (err) {
           return { content: '', error: String(err) };
         }
+      },
+
+      async addNote(text: string): Promise<{ id: string; timestamp: string }> {
+        return gateway.memory.addNote(text);
       },
     };
   }

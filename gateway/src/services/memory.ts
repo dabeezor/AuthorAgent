@@ -163,6 +163,23 @@ export class MemoryService {
     this.liveIndexHook = fn;
   }
 
+  /**
+   * Live-index hook for notes — separate from liveIndexHook (conversation
+   * turns) since notes have their own source ('note') and their own JSONL
+   * file, so they stay searchable/filterable independent of chat history.
+   */
+  private noteIndexHook: ((entry: {
+    id: string;
+    text: string;
+    timestamp: string;
+    personaId: string | null;
+    projectId: string | null;
+  }) => void) | null = null;
+
+  setNoteIndexHook(fn: typeof this.noteIndexHook): void {
+    this.noteIndexHook = fn;
+  }
+
   async process(
     userMessage: string,
     assistantResponse: string,
@@ -201,6 +218,34 @@ export class MemoryService {
       // search indexing failures should never block memory writes
       logger.debug('FTS live-index failed', err);
     }
+  }
+
+  /**
+   * Jot down a freeform story note for later review — separate from the
+   * gated project pipeline, so an idea never has to wait for a formal
+   * project to exist. Appended to memory/notes.jsonl (source of truth) and
+   * live-indexed into memory search (source: 'note') so it's immediately
+   * findable via GET /api/memory/search?q=...&source=note.
+   */
+  async addNote(text: string, context?: { personaId?: string | null; projectId?: string | null }): Promise<{ id: string; timestamp: string }> {
+    const timestamp = new Date().toISOString();
+    const id = `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const personaId = context?.personaId !== undefined ? context.personaId : this.activePersonaId;
+    const projectId = context?.projectId !== undefined ? context.projectId : this.activeProjectPath;
+    const body = text.substring(0, 5000);
+
+    const notesPath = join(this.memoryDir, 'notes.jsonl');
+    const entry = JSON.stringify({ id, timestamp, text: body, personaId, projectId }) + '\n';
+    const { appendFile } = await import('fs/promises');
+    await appendFile(notesPath, entry);
+
+    try {
+      this.noteIndexHook?.({ id, text: body, timestamp, personaId, projectId });
+    } catch (err) {
+      logger.debug('note live-index failed', err);
+    }
+
+    return { id, timestamp };
   }
 
   async setActiveProject(projectId: string): Promise<void> {
