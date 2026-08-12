@@ -69,6 +69,32 @@ describe('MemorySearchService — note indexing', () => {
     expect(hits[0].sourceRef).toBe('notes.jsonl#note-3');
   });
 
+  it('reindexAll() without force: true picks up new notes on a second pass and skips unchanged ones on a third', async () => {
+    if (!search.isAvailable()) return;
+    const memoryDir = join(workspaceDir, 'memory');
+    await mkdir(memoryDir, { recursive: true });
+    const notesPath = join(memoryDir, 'notes.jsonl');
+
+    // First pass: nothing on disk yet.
+    const first = await search.reindexAll();
+    expect(search.search('alpha', { source: 'note' })).toHaveLength(0);
+
+    // Append a note, then reindex WITHOUT force — must not rely on force to pick it up.
+    await appendFile(notesPath, JSON.stringify({
+      id: 'note-5', timestamp: new Date().toISOString(), text: 'alpha idea', personaId: null, projectId: null,
+    }) + '\n');
+    const second = await search.reindexAll();
+    expect(second.indexed).toBeGreaterThanOrEqual(1);
+    expect(search.search('alpha', { source: 'note' })).toHaveLength(1);
+
+    // Third pass with no new append — the notes.jsonl file itself is unchanged,
+    // so this must skip it rather than re-scanning forever.
+    const third = await search.reindexAll();
+    expect(third.skipped).toBeGreaterThanOrEqual(1);
+    // Still exactly one hit — proves the unchanged pass didn't duplicate anything either.
+    expect(search.search('alpha', { source: 'note' })).toHaveLength(1);
+  });
+
   it('reindexAll() is idempotent on repeated notes.jsonl lines (upsert by sourceRef)', async () => {
     if (!search.isAvailable()) return;
     const memoryDir = join(workspaceDir, 'memory');

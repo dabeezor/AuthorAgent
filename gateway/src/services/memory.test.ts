@@ -150,4 +150,12 @@ describe('MemoryService.addNote — freeform story-note capture', () => {
   it('does not throw if no index hook is registered', async () => {
     await expect(memory.addNote('no hook registered')).resolves.toBeTruthy();
   });
+
+  it('still writes the note to disk even if the index hook throws', async () => {
+    memory.setNoteIndexHook(() => { throw new Error('boom — search index unavailable'); });
+    await expect(memory.addNote('survives a bad hook')).resolves.toBeTruthy();
+    const notes = await readNotesFile();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].text).toBe('survives a bad hook');
+  });
 });
