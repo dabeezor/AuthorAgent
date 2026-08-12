@@ -8,22 +8,28 @@
  * before if this is never connected.
  *
  * Design is deliberately simple, not gated: on sync, changes land on a fresh
- * branch, a PR is opened, and it's merged into `main` automatically as soon
- * as GitHub reports it cleanly mergeable. There is no protected integration
- * branch — git history itself is the rollback mechanism (a bad sync is
- * reverted with `git revert -m 1 <merge-sha>`, not blocked ahead of time).
- * The ONE case where nothing automatic happens is a conflicting PR: that's
- * the exact data-loss scenario this service exists to prevent, so it is
- * left open for manual resolution rather than force-resolved.
+ * branch, a PR is opened, and it's merged into the repo's default branch
+ * automatically as soon as GitHub reports it cleanly mergeable AND auto-merge
+ * is enabled (workspaceGit.autoMergeEnabled — on by default, toggleable from
+ * Connections). There is no protected integration branch — git history
+ * itself is the rollback mechanism (a bad sync is reverted with
+ * `git revert -m 1 <merge-sha>`, not blocked ahead of time). Nothing
+ * automatic happens when a PR is NOT cleanly mergeable: that's the exact
+ * data-loss scenario this service exists to prevent, so it's left open for
+ * manual resolution rather than force-resolved. Before creating a new PR,
+ * every sync first checks for one already open from a previous sync attempt
+ * and re-evaluates that instead of piling up duplicates.
  *
- * Modeled after website-deploy.ts's shell-git pattern (execAsync with
- * cwd/timeout/maxBuffer, never throws out of the public API, returns result
- * objects) but adds real credential handling, which website-deploy.ts
- * deliberately does not — see runGit() below for why the token never touches
- * disk or `.git/config`.
+ * Runs git via execFile with an argv array (never a shell string) — no
+ * command-line quoting/escaping surface to get wrong. Credentials: the PAT
+ * is injected per-git-call via a GIT_ASKPASS script that reads it from a
+ * child-process-only env var, and repoUrl is rejected outright if it embeds
+ * userinfo credentials (https://user:token@...) — either path would leave
+ * the token sitting in `.git/config` in plaintext. See runGit() and
+ * hasEmbeddedCredentials() below.
  */
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { existsSync } from 'fs';
 import { mkdir, writeFile, unlink, chmod, readdir } from 'fs/promises';
@@ -35,7 +41,7 @@ import type { ConfigService } from './config.js';
 import type { CronSchedulerService } from './cron-scheduler.js';
 import { isWithin } from '../security/paths.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface GitSyncStatus {
   configured: boolean;
@@ -49,10 +55,11 @@ export interface GitSyncStatus {
   behind: number;
   dirtyFileCount: number;
   lastSyncAt: string | null;
-  lastSyncStatus: 'success' | 'failed' | 'needs-manual-resolution' | null;
+  lastSyncStatus: 'success' | 'failed' | 'needs-manual-resolution' | 'awaiting-manual-merge' | null;
   lastSyncMessage: string | null;
   openPrUrl: string | null;
   syncInProgress: boolean;
+  autoMergeEnabled: boolean;
 }
 
 interface SyncState {
@@ -61,6 +68,8 @@ interface SyncState {
   lastSyncMessage: string | null;
   openPrUrl: string | null;
 }
+
+const EMPTY_SYNC_STATE: SyncState = { lastSyncAt: null, lastSyncStatus: null, lastSyncMessage: null, openPrUrl: null };
 
 interface OwnerRepo {
   owner: string;
@@ -76,7 +85,6 @@ export class WorkspaceGitSyncService {
   private config!: ConfigService;
   private cronScheduler: CronSchedulerService | null = null;
   private syncing = false;
-  private state: SyncState = { lastSyncAt: null, lastSyncStatus: null, lastSyncMessage: null, openPrUrl: null };
 
   constructor(private workspaceDir: string) {}
 
@@ -119,6 +127,7 @@ export class WorkspaceGitSyncService {
     const enabled: boolean = this.config.get('workspaceGit.enabled', false);
     const repoUrl = await this.vault.get(VAULT_REPO_URL_KEY);
     const configured = !!(repoRoot && repoUrl);
+    const syncState: SyncState = this.config.get('workspaceGit.lastSyncState', EMPTY_SYNC_STATE);
 
     const base: GitSyncStatus = {
       configured,
@@ -131,11 +140,12 @@ export class WorkspaceGitSyncService {
       ahead: 0,
       behind: 0,
       dirtyFileCount: 0,
-      lastSyncAt: this.state.lastSyncAt,
-      lastSyncStatus: this.state.lastSyncStatus,
-      lastSyncMessage: this.state.lastSyncMessage,
-      openPrUrl: this.state.openPrUrl,
+      lastSyncAt: syncState.lastSyncAt,
+      lastSyncStatus: syncState.lastSyncStatus,
+      lastSyncMessage: syncState.lastSyncMessage,
+      openPrUrl: syncState.openPrUrl,
       syncInProgress: this.syncing,
+      autoMergeEnabled: this.config.get('workspaceGit.autoMergeEnabled', true),
     };
 
     if (!configured || !existsSync(join(repoRoot, '.git'))) {
@@ -156,12 +166,13 @@ export class WorkspaceGitSyncService {
       base.dirtyFileCount = statusRes.stdout.split('\n').filter(l => l.trim()).length;
 
       try {
-        const revRes = await this.runGit(repoRoot, ['rev-list', '--left-right', '--count', 'origin/main...HEAD'], pat);
+        const defaultBranch = this.getDefaultBranch();
+        const revRes = await this.runGit(repoRoot, ['rev-list', '--left-right', '--count', `origin/${defaultBranch}...HEAD`], pat);
         const [behind, ahead] = revRes.stdout.trim().split(/\s+/).map(n => parseInt(n, 10) || 0);
         base.behind = behind;
         base.ahead = ahead;
       } catch {
-        // origin/main not fetched yet, or repo not tracking it — leave at 0.
+        // origin/<default> not fetched yet, or repo not tracking it — leave at 0.
       }
     } catch {
       // Status is best-effort; any read failure just leaves defaults.
@@ -176,13 +187,22 @@ export class WorkspaceGitSyncService {
     if (!repoUrl || !pat) {
       return { ok: false, message: 'No repo connected — set a repo URL and personal access token first.' };
     }
-    return this.testCredentials(repoUrl, pat);
+    const test = await this.testCredentials(repoUrl, pat);
+    return { ok: test.ok, message: test.message };
   }
 
   async connect(input: { repoUrl: string; pat: string; repoRoot: string }): Promise<GitSyncStatus> {
     const { repoUrl, pat, repoRoot } = input;
     if (!repoUrl || !pat || !repoRoot) {
       throw new Error('repoUrl, pat, and repoRoot are all required');
+    }
+    if (this.hasEmbeddedCredentials(repoUrl)) {
+      throw new Error(
+        'repoUrl must not contain embedded credentials (e.g. https://user:token@github.com/...). ' +
+        'Use the separate personal access token field instead — an embedded credential would be ' +
+        'written to .git/config in plaintext by git itself, which defeats the whole point of keeping ' +
+        'the token out of the filesystem.'
+      );
     }
     if (!isWithin(repoRoot, this.workspaceDir)) {
       throw new Error(
@@ -220,6 +240,7 @@ export class WorkspaceGitSyncService {
     await this.vault.set(VAULT_PAT_KEY, pat);
     await this.config.setAndPersist('workspaceGit.repoRoot', repoRoot);
     await this.config.setAndPersist('workspaceGit.enabled', true);
+    await this.config.setAndPersist('workspaceGit.defaultBranch', test.defaultBranch || 'main');
     await this.ensureCronJob();
 
     return this.getStatus();
@@ -258,25 +279,41 @@ export class WorkspaceGitSyncService {
       return this.finishSync(false, 'Workspace git sync is not configured', null);
     }
     const relPath = this.relWorkspacePath(repoRoot);
+    const defaultBranch = this.getDefaultBranch();
+    // May be null for a malformed repoUrl (shouldn't happen post-connect(),
+    // since connect() requires a URL that already parsed successfully — kept
+    // nullable here defensively rather than throwing before we've even tried
+    // to see if there's anything to do).
+    const owner = this.parseOwnerRepo(repoUrl);
 
     try {
-      await this.runGit(repoRoot, ['checkout', 'main'], pat);
+      await this.runGit(repoRoot, ['checkout', defaultBranch], pat);
       await this.runGit(repoRoot, ['fetch', 'origin'], pat);
+
+      // Before touching local changes, check whether an earlier sync's PR is
+      // still open. If so, re-evaluate THAT one instead of piling up a
+      // second competing branch/PR — and do this even if the workspace is
+      // currently clean, so an unresolved PR never silently disappears from
+      // status just because nothing new happened to sync this round.
+      if (owner) {
+        const existingPr = await this.findOpenSyncPr(owner, defaultBranch, pat).catch(() => null);
+        if (existingPr) {
+          return this.resolvePr(owner, pat, repoRoot, defaultBranch, existingPr, existingPr.head?.ref || null, /* rounds */ 3);
+        }
+      }
 
       const statusRes = await this.runGit(repoRoot, ['status', '--porcelain', '--', relPath], pat);
       if (!statusRes.stdout.trim()) {
         return this.finishSync(true, 'Nothing to sync — workspace is clean', null);
       }
 
-      // Only needed once we actually have something to open a PR for.
-      const owner = this.parseOwnerRepo(repoUrl);
       if (!owner) {
         return this.finishSync(false, `Could not parse owner/repo from ${this.sanitizeRepoUrl(repoUrl)}`, null);
       }
 
       const stamp = this.timestamp();
       const branch = `sync/${this.safeHostname()}-${stamp}`;
-      await this.runGit(repoRoot, ['checkout', '-B', branch, 'origin/main'], pat);
+      await this.runGit(repoRoot, ['checkout', '-B', branch, `origin/${defaultBranch}`], pat);
       // A fresh clone (e.g. a new container) has no global git identity —
       // set it locally so commit doesn't fail. Harmless if already set.
       await this.runGit(repoRoot, ['config', 'user.email', 'authoragent@localhost'], pat);
@@ -288,32 +325,14 @@ export class WorkspaceGitSyncService {
       const pr = await this.githubApi(owner, 'POST', '/pulls', pat, {
         title: `Workspace sync from ${this.safeHostname()} — ${stamp}`,
         head: branch,
-        base: 'main',
+        base: defaultBranch,
         body: 'Automatic manuscript workspace sync opened by AuthorAgent.',
       });
 
-      const cleanlyMergeable = await this.pollMergeable(owner, pr.number, pat);
-
-      if (cleanlyMergeable) {
-        await this.githubApi(owner, 'PUT', `/pulls/${pr.number}/merge`, pat, { merge_method: 'merge' });
-        await this.githubApi(owner, 'DELETE', `/git/refs/heads/${branch}`, pat).catch(() => {});
-        await this.runGit(repoRoot, ['checkout', 'main'], pat);
-        await this.runGit(repoRoot, ['pull', 'origin', 'main'], pat);
-        return this.finishSync(true, `Synced and merged (PR #${pr.number})`, null);
-      }
-
-      // Not cleanly mergeable — leave the PR and branch as-is for a human to
-      // resolve. Never force anything here; this is the data-loss case.
-      await this.runGit(repoRoot, ['checkout', 'main'], pat);
-      return this.finishSync(
-        false,
-        `PR #${pr.number} is not cleanly mergeable — needs manual resolution.`,
-        pr.html_url,
-        'needs-manual-resolution'
-      );
+      return this.resolvePr(owner, pat, repoRoot, defaultBranch, pr, branch, /* rounds */ 10);
     } catch (err: any) {
       try {
-        await this.runGit(repoRoot, ['checkout', 'main'], pat);
+        await this.runGit(repoRoot, ['checkout', defaultBranch], pat);
       } catch {
         // best-effort recovery — don't mask the original error
       }
@@ -321,10 +340,62 @@ export class WorkspaceGitSyncService {
     }
   }
 
-  private async pollMergeable(owner: OwnerRepo, prNumber: number, pat: string): Promise<boolean> {
+  /**
+   * Shared merge decision for both a freshly-opened PR and a still-open one
+   * found from an earlier sync. Merges only when cleanly mergeable AND
+   * auto-merge is enabled; otherwise leaves the PR untouched and reports why.
+   */
+  private async resolvePr(
+    owner: OwnerRepo,
+    pat: string,
+    repoRoot: string,
+    defaultBranch: string,
+    pr: { number: number; html_url: string },
+    branchToDelete: string | null,
+    pollRounds: number
+  ): Promise<{ success: boolean; message: string; status: GitSyncStatus }> {
+    const cleanlyMergeable = await this.pollMergeable(owner, pr.number, pat, pollRounds);
+    const autoMergeEnabled: boolean = this.config.get('workspaceGit.autoMergeEnabled', true);
+
+    if (cleanlyMergeable && autoMergeEnabled) {
+      await this.githubApi(owner, 'PUT', `/pulls/${pr.number}/merge`, pat, { merge_method: 'merge' });
+      if (branchToDelete) {
+        await this.githubApi(owner, 'DELETE', `/git/refs/heads/${branchToDelete}`, pat).catch(() => {});
+      }
+      await this.runGit(repoRoot, ['checkout', defaultBranch], pat);
+      await this.runGit(repoRoot, ['pull', 'origin', defaultBranch], pat);
+      return this.finishSync(true, `Synced and merged (PR #${pr.number})`, null);
+    }
+
+    // Not merging — never force anything here; this is the data-loss case
+    // (a real conflict) or a deliberate manual-merge gate the user chose.
+    await this.runGit(repoRoot, ['checkout', defaultBranch], pat);
+    if (cleanlyMergeable) {
+      return this.finishSync(
+        false,
+        `PR #${pr.number} is cleanly mergeable but auto-merge is disabled — merge it manually.`,
+        pr.html_url,
+        'awaiting-manual-merge'
+      );
+    }
+    return this.finishSync(
+      false,
+      `PR #${pr.number} is not cleanly mergeable — needs manual resolution.`,
+      pr.html_url,
+      'needs-manual-resolution'
+    );
+  }
+
+  private async findOpenSyncPr(owner: OwnerRepo, defaultBranch: string, pat: string): Promise<{ number: number; html_url: string; head: { ref: string } } | null> {
+    const prs = await this.githubApi(owner, 'GET', `/pulls?state=open&base=${encodeURIComponent(defaultBranch)}`, pat);
+    if (!Array.isArray(prs)) return null;
+    return prs.find((pr: any) => typeof pr?.head?.ref === 'string' && pr.head.ref.startsWith('sync/')) || null;
+  }
+
+  private async pollMergeable(owner: OwnerRepo, prNumber: number, pat: string, rounds = 10): Promise<boolean> {
     // GitHub computes mergeability asynchronously — mergeable is null until
     // it's done. Poll a bounded number of times rather than looping forever.
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < rounds; i++) {
       const pr = await this.githubApi(owner, 'GET', `/pulls/${prNumber}`, pat);
       if (pr.mergeable !== null && pr.mergeable !== undefined) {
         return pr.mergeable === true && pr.mergeable_state === 'clean';
@@ -340,12 +411,15 @@ export class WorkspaceGitSyncService {
     openPrUrl: string | null,
     statusOverride?: GitSyncStatus['lastSyncStatus']
   ): Promise<{ success: boolean; message: string; status: GitSyncStatus }> {
-    this.state = {
+    const state: SyncState = {
       lastSyncAt: new Date().toISOString(),
       lastSyncStatus: statusOverride || (success ? 'success' : 'failed'),
       lastSyncMessage: message,
       openPrUrl,
     };
+    // Persisted (not just in-memory) so an "unresolved PR" signal survives a
+    // process restart instead of silently resetting to "nothing to report".
+    await this.config.setAndPersist('workspaceGit.lastSyncState', state);
     return { success, message, status: await this.getStatus() };
   }
 
@@ -353,7 +427,7 @@ export class WorkspaceGitSyncService {
   // GitHub REST API (fetch — no Octokit, no gh CLI dependency)
   // ═══════════════════════════════════════════════════════════
 
-  private async testCredentials(repoUrl: string, pat: string): Promise<{ ok: boolean; message: string }> {
+  private async testCredentials(repoUrl: string, pat: string): Promise<{ ok: boolean; message: string; defaultBranch?: string }> {
     const owner = this.parseOwnerRepo(repoUrl);
     if (!owner) {
       return { ok: false, message: `Could not parse an owner/repo from "${repoUrl}". Expected something like https://github.com/owner/repo.git` };
@@ -363,7 +437,11 @@ export class WorkspaceGitSyncService {
       if (!repo?.permissions?.push) {
         return { ok: false, message: `Token is valid but does not have push access to ${owner.owner}/${owner.repo}.` };
       }
-      return { ok: true, message: `Connected to ${owner.owner}/${owner.repo} with push access.` };
+      return {
+        ok: true,
+        message: `Connected to ${owner.owner}/${owner.repo} with push access.`,
+        defaultBranch: repo.default_branch || 'main',
+      };
     } catch (err: any) {
       return { ok: false, message: err?.message || 'Could not reach the GitHub API with this token.' };
     }
@@ -399,6 +477,28 @@ export class WorkspaceGitSyncService {
     return owner ? `${owner.owner}/${owner.repo}` : '(unrecognized repo url)';
   }
 
+  /**
+   * True if repoUrl embeds userinfo credentials (https://user:token@host/...).
+   * git writes whatever URL it's given verbatim into .git/config's
+   * remote.origin.url — the whole point of the GIT_ASKPASS design below is
+   * to keep the token out of that file, so a token pasted directly into the
+   * URL has to be rejected outright rather than silently accepted.
+   */
+  private hasEmbeddedCredentials(repoUrl: string): boolean {
+    try {
+      const u = new URL(repoUrl);
+      return u.username !== '' || u.password !== '';
+    } catch {
+      // Not a parseable URL (e.g. scp-style git@host:path) — no userinfo
+      // syntax to embed a credential in either way.
+      return false;
+    }
+  }
+
+  private getDefaultBranch(): string {
+    return this.config.get('workspaceGit.defaultBranch', 'main');
+  }
+
   // ═══════════════════════════════════════════════════════════
   // git CLI + credential injection
   // ═══════════════════════════════════════════════════════════
@@ -421,11 +521,17 @@ export class WorkspaceGitSyncService {
    * script that never contains the token itself — it reads it from a
    * child-process-only environment variable. This means:
    *   - the askpass script file on disk never has the secret in it
-   *   - .git/config's remote URL is never token-embedded (no leaked PAT if
-   *     someone reads the repo's config later)
+   *   - .git/config's remote URL is never token-embedded (connect() also
+   *     separately rejects a repoUrl that already embeds one — see
+   *     hasEmbeddedCredentials())
    *   - the token only ever lives in this one process's env, for the
    *     duration of one git command
    * Script is deleted immediately after every call, success or failure.
+   *
+   * Runs via execFile with an argv array — never a shell command string — so
+   * there's no shell-quoting surface at all (no `&&`/`|` injection, and no
+   * cmd.exe `%VAR%` expansion on Windows, which a shell-string approach with
+   * manual quoting would be exposed to).
    */
   private async runGit(cwd: string, args: string[], pat: string): Promise<{ stdout: string; stderr: string }> {
     const askpassPath = join(tmpdir(), `authorclaw-askpass-${randomBytes(8).toString('hex')}.sh`);
@@ -435,8 +541,7 @@ export class WorkspaceGitSyncService {
       if (process.platform !== 'win32') {
         await chmod(askpassPath, 0o700).catch(() => {});
       }
-      const cmd = `git ${args.map(a => this.shellQuote(a)).join(' ')}`;
-      return await execAsync(cmd, {
+      return await execFileAsync('git', args, {
         cwd,
         timeout: 5 * 60 * 1000,
         maxBuffer: 10 * 1024 * 1024,
@@ -450,12 +555,5 @@ export class WorkspaceGitSyncService {
     } finally {
       await unlink(askpassPath).catch(() => {});
     }
-  }
-
-  private shellQuote(s: string): string {
-    if (process.platform === 'win32') {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return `'${s.replace(/'/g, `'\\''`)}'`;
   }
 }

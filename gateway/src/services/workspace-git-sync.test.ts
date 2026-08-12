@@ -115,6 +115,17 @@ describe('WorkspaceGitSyncService', () => {
         .rejects.toThrow(/already exists, is not empty, and has no \.git directory/);
     });
 
+    it('rejects a repoUrl with embedded credentials before touching git', async () => {
+      const svc = makeService();
+      const runGit = vi.spyOn(svc as any, 'runGit');
+      await expect(svc.connect({
+        repoUrl: 'https://x-access-token:ghp_faketoken@github.com/owner/repo.git',
+        pat: 'fake-pat',
+        repoRoot,
+      })).rejects.toThrow(/embedded credentials/);
+      expect(runGit).not.toHaveBeenCalled();
+    });
+
     it('rejects when the workspace dir is not inside the repo root', async () => {
       const svc = new WorkspaceGitSyncService(join(workDir, 'somewhere-else'));
       svc.setServices(makeFakeVault(), makeFakeConfig());
@@ -145,6 +156,7 @@ describe('WorkspaceGitSyncService', () => {
       vi.spyOn(svc as any, 'parseOwnerRepo').mockReturnValue({ owner: 'test-owner', repo: 'test-repo' });
       const githubApi = vi.spyOn(svc as any, 'githubApi').mockImplementation(async (...args: any[]) => {
         const [, method, path] = args as [any, string, string];
+        if (method === 'GET' && path.startsWith('/pulls?state=open')) return []; // no earlier sync PR open
         if (method === 'POST' && path === '/pulls') return { number: 1, html_url: 'https://example.invalid/pr/1' };
         if (method === 'GET' && path === '/pulls/1') return { number: 1, mergeable: true, mergeable_state: 'clean', html_url: 'https://example.invalid/pr/1' };
         if (method === 'PUT' && path === '/pulls/1/merge') return { merged: true };
@@ -167,6 +179,7 @@ describe('WorkspaceGitSyncService', () => {
       vi.spyOn(svc as any, 'parseOwnerRepo').mockReturnValue({ owner: 'test-owner', repo: 'test-repo' });
       vi.spyOn(svc as any, 'githubApi').mockImplementation(async (...args: any[]) => {
         const [, method, path] = args as [any, string, string];
+        if (method === 'GET' && path.startsWith('/pulls?state=open')) return [];
         if (method === 'POST' && path === '/pulls') return { number: 2, html_url: 'https://example.invalid/pr/2' };
         if (method === 'GET' && path === '/pulls/2') return { number: 2, mergeable: false, mergeable_state: 'dirty', html_url: 'https://example.invalid/pr/2' };
         throw new Error(`Unexpected githubApi call: ${method} ${path}`);
@@ -176,6 +189,52 @@ describe('WorkspaceGitSyncService', () => {
       expect(result.success).toBe(false);
       expect(result.status.lastSyncStatus).toBe('needs-manual-resolution');
       expect(result.status.openPrUrl).toBe('https://example.invalid/pr/2');
+    });
+
+    it('reuses an already-open sync PR instead of opening a second one', async () => {
+      const svc = makeService();
+      await svc.connect({ repoUrl: originDir, pat: 'fake-pat', repoRoot });
+      await writeFile(join(workspaceDir, 'chapter-1.md'), '# Chapter 1\n');
+
+      vi.spyOn(svc as any, 'parseOwnerRepo').mockReturnValue({ owner: 'test-owner', repo: 'test-repo' });
+      const githubApi = vi.spyOn(svc as any, 'githubApi').mockImplementation(async (...args: any[]) => {
+        const [, method, path] = args as [any, string, string];
+        if (method === 'GET' && path.startsWith('/pulls?state=open')) {
+          return [{ number: 9, html_url: 'https://example.invalid/pr/9', head: { ref: 'sync/other-host-earlier' } }];
+        }
+        if (method === 'GET' && path === '/pulls/9') return { number: 9, mergeable: true, mergeable_state: 'clean', html_url: 'https://example.invalid/pr/9' };
+        if (method === 'PUT' && path === '/pulls/9/merge') return { merged: true };
+        if (method === 'DELETE') return {};
+        throw new Error(`Unexpected githubApi call: ${method} ${path}`);
+      });
+
+      const result = await svc.syncNow();
+      expect(result.success).toBe(true);
+      expect(result.message).toMatch(/PR #9/);
+      // Never created a new PR — only the existing one was queried/merged.
+      expect(githubApi.mock.calls.some(c => c[1] === 'POST' && c[2] === '/pulls')).toBe(false);
+    });
+
+    it('leaves a cleanly-mergeable PR unmerged when auto-merge is disabled', async () => {
+      const svc = makeService();
+      await svc.connect({ repoUrl: originDir, pat: 'fake-pat', repoRoot });
+      await (svc as any).config.setAndPersist('workspaceGit.autoMergeEnabled', false);
+      await writeFile(join(workspaceDir, 'chapter-1.md'), '# Chapter 1\n');
+
+      vi.spyOn(svc as any, 'parseOwnerRepo').mockReturnValue({ owner: 'test-owner', repo: 'test-repo' });
+      const githubApi = vi.spyOn(svc as any, 'githubApi').mockImplementation(async (...args: any[]) => {
+        const [, method, path] = args as [any, string, string];
+        if (method === 'GET' && path.startsWith('/pulls?state=open')) return [];
+        if (method === 'POST' && path === '/pulls') return { number: 3, html_url: 'https://example.invalid/pr/3' };
+        if (method === 'GET' && path === '/pulls/3') return { number: 3, mergeable: true, mergeable_state: 'clean', html_url: 'https://example.invalid/pr/3' };
+        throw new Error(`Unexpected githubApi call: ${method} ${path}`);
+      });
+
+      const result = await svc.syncNow();
+      expect(result.success).toBe(false);
+      expect(result.status.lastSyncStatus).toBe('awaiting-manual-merge');
+      expect(result.status.openPrUrl).toBe('https://example.invalid/pr/3');
+      expect(githubApi.mock.calls.some(c => c[1] === 'PUT')).toBe(false);
     });
 
     it('returns immediately when a sync is already in progress', async () => {

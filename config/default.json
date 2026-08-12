@@ -86,7 +86,9 @@
   "workspaceGit": {
     "enabled": false,
     "repoRoot": "",
+    "defaultBranch": null,
     "syncIntervalMinutes": 30,
-    "autoMergeEnabled": true
+    "autoMergeEnabled": true,
+    "lastSyncState": null
   }
 }

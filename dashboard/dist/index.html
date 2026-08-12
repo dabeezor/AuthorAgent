@@ -1573,6 +1573,10 @@ textarea { resize: vertical; min-height: 60px; }
           <label>Repo root (local path)</label>
           <input type="text" id="gitRepoRoot" placeholder="e.g. D:\Projects\alpha-press, or /app/workspace on the NAS">
         </div>
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gitAutoMergeEnabled" style="width:auto;" checked> Auto-merge cleanly-mergeable syncs</label>
+          <p class="hint" style="margin-top:4px;">On: a sync PR merges itself as soon as GitHub reports no conflicts. Off: sync still opens the PR, but you merge it yourself.</p>
+        </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
           <button class="success" id="btnConnectGit">Connect</button>
           <button class="secondary" id="btnTestGit">Test</button>
@@ -4942,9 +4946,11 @@ function loadWorkspaceGitStatus() {
       if (data.syncInProgress) parts.push('<span style="color:var(--accent);">syncing now...</span>');
       el.innerHTML = parts.join(' &middot; ');
     }
-    if (data.lastSyncStatus === 'needs-manual-resolution') {
+    document.getElementById('gitAutoMergeEnabled').checked = data.autoMergeEnabled !== false;
+    if (data.lastSyncStatus === 'needs-manual-resolution' || data.lastSyncStatus === 'awaiting-manual-merge') {
+      var prefix = data.lastSyncStatus === 'awaiting-manual-merge' ? 'Ready to merge (auto-merge is off): ' : 'Last sync needs manual resolution: ';
       banner.style.display = 'block';
-      banner.innerHTML = 'Last sync needs manual resolution: ' + escapeHtml(data.lastSyncMessage || '') +
+      banner.innerHTML = prefix + escapeHtml(data.lastSyncMessage || '') +
         (data.openPrUrl ? ' <a href="' + data.openPrUrl + '" target="_blank" rel="noopener">Open PR &rarr;</a>' : '');
     } else {
       banner.style.display = 'none';
@@ -4993,6 +4999,12 @@ document.getElementById('btnDisconnectGit').addEventListener('click', function()
     showToast('Workspace git sync paused', 'info');
     loadWorkspaceGitStatus();
   }).catch(function(e) { showToast('Failed: ' + e.message, 'error'); });
+});
+
+document.getElementById('gitAutoMergeEnabled').addEventListener('change', function(e) {
+  api('POST', '/api/config/update', { path: 'workspaceGit.autoMergeEnabled', value: e.target.checked }).then(function() {
+    showToast(e.target.checked ? 'Auto-merge enabled' : 'Auto-merge disabled — syncs will open PRs for you to merge', 'info');
+  }).catch(function(err) { showToast('Failed: ' + err.message, 'error'); });
 });
 
 // ── Voice ──
