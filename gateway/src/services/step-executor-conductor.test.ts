@@ -645,3 +645,91 @@ describe('executeStepWithRetry — gate check (ALP-1610)', () => {
     }
   });
 });
+
+describe('reviseStep — on-demand rework of already-completed steps', () => {
+  it('revises an ungated completed step; it lands back on completed (no gate to open)', async () => {
+    vi.useFakeTimers();
+    try {
+      const project = makeProject('single-ungated-revise', [{ id: 'U1', status: 'completed', result: 'old content' }]);
+      const timeline: TimelineEvent[] = [];
+      const handler = makeHandler({ U1: { respond: LONG } }, timeline);
+      const engine = makeEngine(project);
+      const openStepGateSpy = vi.spyOn(engine, 'openStepGate');
+
+      const exec = new StepExecutor(engine, makeDeps(handler));
+      const result = await exec.reviseStep(project.id, 'U1', 'Make it punchier.', workspaceDir);
+
+      expect(result.ok).toBe(true);
+      expect(openStepGateSpy).toHaveBeenCalled();
+      expect(project.steps[0].status).toBe('completed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('revises a gated completed step; it reopens the gate to awaiting_review', async () => {
+    vi.useFakeTimers();
+    try {
+      const project = makeProject('single-gated-revise', [{ id: 'G1', status: 'completed', gateEnabled: true, result: 'old content' }]);
+      const timeline: TimelineEvent[] = [];
+      const handler = makeHandler({ G1: { respond: LONG } }, timeline);
+      const engine = makeEngine(project);
+
+      const exec = new StepExecutor(engine, makeDeps(handler));
+      const result = await exec.reviseStep(project.id, 'G1', 'Make it punchier.', workspaceDir);
+
+      expect(result.ok).toBe(true);
+      expect(project.steps[0].status).toBe('awaiting_review');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still revises a step that is genuinely awaiting_review (unchanged behavior)', async () => {
+    vi.useFakeTimers();
+    try {
+      const project = makeProject('single-awaiting-revise', [{ id: 'A1', status: 'awaiting_review', gateEnabled: true, result: 'old content' }]);
+      const timeline: TimelineEvent[] = [];
+      const handler = makeHandler({ A1: { respond: LONG } }, timeline);
+      const engine = makeEngine(project);
+
+      const exec = new StepExecutor(engine, makeDeps(handler));
+      const result = await exec.reviseStep(project.id, 'A1', 'Tighten it.', workspaceDir);
+
+      expect(result.ok).toBe(true);
+      expect(project.steps[0].status).toBe('awaiting_review');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects revising a step that has never run (pending)', async () => {
+    const project = makeProject('single-pending-revise', [{ id: 'P1', status: 'pending' }]);
+    const engine = makeEngine(project);
+    // reviseStep checks the handler is wired before it ever looks at step
+    // status, so a real (unused-in-this-test) handler is required to reach
+    // the status guard being tested here.
+    const exec = new StepExecutor(engine, makeDeps(makeHandler({}, [])));
+
+    const result = await exec.reviseStep(project.id, 'P1', 'feedback', workspaceDir);
+    expect(result).toEqual({ ok: false, kind: 'not-awaiting-review' });
+  });
+
+  it('rejects revising a step that is currently active', async () => {
+    const project = makeProject('single-active-revise', [{ id: 'AC1', status: 'active' }]);
+    const engine = makeEngine(project);
+    const exec = new StepExecutor(engine, makeDeps(makeHandler({}, [])));
+
+    const result = await exec.reviseStep(project.id, 'AC1', 'feedback', workspaceDir);
+    expect(result).toEqual({ ok: false, kind: 'not-awaiting-review' });
+  });
+
+  it('rejects revising a failed step', async () => {
+    const project = makeProject('single-failed-revise', [{ id: 'F1', status: 'failed', error: 'boom' }]);
+    const engine = makeEngine(project);
+    const exec = new StepExecutor(engine, makeDeps(makeHandler({}, [])));
+
+    const result = await exec.reviseStep(project.id, 'F1', 'feedback', workspaceDir);
+    expect(result).toEqual({ ok: false, kind: 'not-awaiting-review' });
+  });
+});

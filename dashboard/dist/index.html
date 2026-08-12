@@ -2147,9 +2147,9 @@ function startPolling() {
 // identical authoragent:review-open bridge event, so the mounted component
 // and its session state are the same regardless of entry point.
 // ================================================================
-function openReviewSurface(projectId, stepId, stepLabel) {
+function openReviewSurface(projectId, stepId, stepLabel, stepStatus) {
   window.dispatchEvent(new CustomEvent('authoragent:review-open', {
-    detail: { projectId: projectId, stepId: stepId, stepLabel: stepLabel }
+    detail: { projectId: projectId, stepId: stepId, stepLabel: stepLabel, stepStatus: stepStatus }
   }));
 }
 
@@ -2191,7 +2191,7 @@ function renderReviewsQueue(queue) {
       '<span class="doc-meta">' + esc(item.phase || '') + '</span>' +
       '<span class="badge badge-awaiting_review" style="font-size:10px;">NEEDS REVIEW</span>';
     row.addEventListener('click', function() {
-      openReviewSurface(item.projectId, item.stepId, item.stepLabel);
+      openReviewSurface(item.projectId, item.stepId, item.stepLabel, item.status);
     });
     el.appendChild(row);
   });
@@ -3316,6 +3316,17 @@ function openProjectDetail(id) {
           'style="font-size:10px;padding:3px 8px;margin-left:4px;" ' +
           'title="Reset this step to pending so it can be re-run">' + (s.status === 'failed' ? 'Retry' : 'Re-run') + '</button>';
       }
+      // On-demand review: opens the same review surface a gated (awaiting_review)
+      // step opens automatically, but for ANY step that has output to look at —
+      // not just ones a gate happened to pause on. Comments/inline edits/diff/
+      // approve all work unchanged; the API and ReviewSurface are gate-agnostic
+      // already, this button is just an unconditional entry point to them.
+      var reviewBtn = '';
+      if (s.status !== 'pending') {
+        reviewBtn = '<button class="small pd-review-step" data-step-id="' + esc(s.id) + '" data-step-label="' + esc(s.label || '') + '" data-step-status="' + esc(s.status) + '" ' +
+          'style="font-size:10px;padding:3px 8px;margin-left:4px;" ' +
+          'title="Open this step\'s output to comment or edit inline">Review</button>';
+      }
       // Per-chapter zero-paste "Check" menu on completed writing steps
       var checkMenu = '';
       if (s.status === 'completed' && isWritingStep(s)) {
@@ -3339,6 +3350,7 @@ function openProjectDetail(id) {
           '</div>' +
           '<span class="badge badge-' + esc(s.status) + '" style="font-size:10px;">' + statusLabel + '</span>' +
           checkMenu +
+          reviewBtn +
           retryBtn +
         '</div>' +
         '<div class="step-output" id="stepOutput' + i + '">' + esc(s.output || s.result || 'No output available.') + '</div>';
@@ -3543,6 +3555,16 @@ function openProjectDetail(id) {
   if (pdCompile) pdCompile.addEventListener('click', function() { compileProject(id); });
 
   // Per-step retry / re-run buttons
+  detail.querySelectorAll('.pd-review-step').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var stepId = btn.getAttribute('data-step-id');
+      var stepLabel = btn.getAttribute('data-step-label') || stepId;
+      var stepStatus = btn.getAttribute('data-step-status');
+      openReviewSurface(id, stepId, stepLabel, stepStatus);
+    });
+  });
+
   detail.querySelectorAll('.pd-retry-step').forEach(function(btn) {
     btn.addEventListener('click', function(e) {
       e.stopPropagation();
@@ -3622,7 +3644,7 @@ function openProjectDetail(id) {
       var idx = item.getAttribute('data-step-idx');
       if (item.getAttribute('data-step-status') === 'awaiting_review') {
         var s = steps[Number(idx)];
-        if (s) openReviewSurface(id, s.id, s.label || s.name);
+        if (s) openReviewSurface(id, s.id, s.label || s.name, s.status);
         return;
       }
       var out = document.getElementById('stepOutput' + idx);

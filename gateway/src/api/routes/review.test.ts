@@ -70,4 +70,14 @@ describe('review queue route', () => {
     ]);
     expect(body.queue[1].dirty).toEqual({ causeStepId: 'outline' });
   });
+
+  it('includes each item\'s step status, so the client can tell a dirty-but-completed item apart from a truly gated one', async () => {
+    const response = await fetch(`${baseUrl}/api/reviews`);
+    const body = await response.json();
+    expect(body.queue.map((item: { stepId: string; status: string }) => `${item.stepId}:${item.status}`)).toEqual([
+      'outline:awaiting_review',
+      'chapter-1:completed',
+      'bible:awaiting_review',
+    ]);
+  });
 });

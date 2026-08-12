@@ -7,6 +7,11 @@ export interface ReviewSurfaceProps {
   projectId: string;
   stepId: string;
   stepLabel?: string;
+  /** Step status when the surface was opened — a step from an ungated
+   *  phase (e.g. writing/revision/polish/assembly, or any phase with gates
+   *  off) can be 'completed' here with no gate to approve. Approve stays
+   *  disabled until the step is actually 'awaiting_review'. */
+  stepStatus?: string;
   onClose: () => void;
 }
 
@@ -28,8 +33,12 @@ function formatTs(ts: number): string {
  * (gateway/src/api/routes/review.ts) exclusively; carries no knowledge of
  * how it was opened beyond the projectId/stepId it's given.
  */
-export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewSurfaceProps) {
+export function ReviewSurface({ projectId, stepId, stepLabel, stepStatus, onClose }: ReviewSurfaceProps) {
   const [loadState, setLoadState] = useState<LoadState>('loading');
+  // Tracked locally (not just the prop) so a successful revise — which can
+  // reopen the gate on a previously-ungated/completed step — re-enables
+  // Approve immediately, without the caller having to reopen the surface.
+  const [gateStatus, setGateStatus] = useState(stepStatus);
   const [versions, setVersions] = useState<VersionEntry[]>([]);
   const [impact, setImpact] = useState<ImpactResponse | null>(null);
   const [editedContent, setEditedContent] = useState('');
@@ -144,10 +153,17 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
         setRevisePanelOpen(false);
         setReviseComments('');
         setReviseNotes('');
+        const updatedStep = result.project?.steps?.find((s) => s.id === stepId);
+        if (updatedStep) setGateStatus(updatedStep.status);
         // loadAll() clears any existing message as it starts, so the success
         // message must be set after it resolves, not before.
         await loadAll();
-        setMessage({ kind: 'success', text: `Agent revised the document (v${result.version}).` });
+        setMessage({
+          kind: 'success',
+          text: updatedStep?.status === 'awaiting_review'
+            ? `Agent revised the document (v${result.version}) — ready for your approval.`
+            : `Agent revised the document (v${result.version}).`,
+        });
       } else {
         setMessage({ kind: 'error', text: result.error || 'Revision failed.' });
       }
@@ -375,7 +391,13 @@ export function ReviewSurface({ projectId, stepId, stepLabel, onClose }: ReviewS
           <button type="button" disabled={!hasUnsavedEdits || busy != null} onClick={handleSave} data-testid="review-save">
             {busy === 'save' ? 'Saving…' : 'Save edits'}
           </button>
-          <button type="button" disabled={busy != null} onClick={handleApprove} data-testid="review-approve">
+          <button
+            type="button"
+            disabled={busy != null || gateStatus !== 'awaiting_review'}
+            onClick={handleApprove}
+            data-testid="review-approve"
+            title={gateStatus !== 'awaiting_review' ? "Nothing to approve — this step isn't gated right now" : undefined}
+          >
             {busy === 'approve' ? 'Approving…' : 'Approve'}
           </button>
           <button

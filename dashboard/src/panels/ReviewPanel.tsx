@@ -6,6 +6,9 @@ export interface ReviewOpenDetail {
   projectId: string;
   stepId: string;
   stepLabel?: string;
+  /** Step status at the moment the surface was opened — governs whether
+   *  Approve makes sense (only for a step actually paused on a gate). */
+  stepStatus?: string;
 }
 
 /**
@@ -37,6 +40,7 @@ export function ReviewPanel() {
       projectId={openReview.projectId}
       stepId={openReview.stepId}
       stepLabel={openReview.stepLabel}
+      stepStatus={openReview.stepStatus}
       onClose={() => {
         setOpenReview(null);
         emit('review-close');

@@ -38,6 +38,10 @@ export interface ReviseResult {
   version?: number;
   error?: string;
   detail?: unknown;
+  /** The gateway returns the full updated project on success — narrowly
+   *  typed to just what the review surface needs (the revised step's new
+   *  status, so Approve can re-enable itself without a manual reopen). */
+  project?: { steps?: Array<{ id: string; status: string }> };
 }
 
 class ApiError extends Error {}
