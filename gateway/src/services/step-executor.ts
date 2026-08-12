@@ -366,7 +366,15 @@ export class StepExecutor {
 
     const step = project.steps.find((s: any) => s.id === stepId);
     if (!step) return { ok: false, kind: 'no-step' };
-    if (step.status !== 'awaiting_review') return { ok: false, kind: 'not-awaiting-review' };
+    // Revising is valid whenever there's finished content to rework — a
+    // step actually paused on a gate (awaiting_review), or a step from an
+    // ungated phase that's simply completed (on-demand review, no gate
+    // involved). openStepGate() below re-derives the right status via
+    // applyStepCompletion(): ungated phases land back on 'completed',
+    // gated ones land back on 'awaiting_review' for a fresh approval.
+    if (step.status !== 'awaiting_review' && step.status !== 'completed') {
+      return { ok: false, kind: 'not-awaiting-review' };
+    }
 
     const { join } = await import('path');
     // Per-phase dir (ALP-1548), falling back to the legacy flat dir when this

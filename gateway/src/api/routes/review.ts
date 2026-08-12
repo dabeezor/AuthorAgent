@@ -110,6 +110,7 @@ export function registerReviewRoutes(ctx: ApiContext): void {
           phase: step.phase,
           gate: step.gate,
           dirty: step.dirty,
+          status: step.status,
         })),
     );
 
@@ -335,7 +336,7 @@ export function registerReviewRoutes(ctx: ApiContext): void {
       case 'no-step':
         return res.status(404).json({ error: 'Step not found' });
       case 'not-awaiting-review':
-        return res.status(400).json({ error: `Step is "${step.status}", not awaiting_review` });
+        return res.status(400).json({ error: `Step is "${step.status}" — only a step that's awaiting review or already completed can be revised` });
       case 'provider-failure':
         return res.json({ success: false, error: 'AI provider failure — see detail', detail: result.detail, project: result.project });
       case 'short-response':

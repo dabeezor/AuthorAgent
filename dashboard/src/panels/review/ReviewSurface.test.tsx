@@ -90,7 +90,7 @@ describe('ReviewSurface', () => {
     stubHappyPath();
     const approveSpy = vi.spyOn(reviewApi, 'approveStep').mockResolvedValue({ step: {}, project: {} });
 
-    render(<ReviewSurface projectId="p1" stepId="s1" onClose={() => {}} />);
+    render(<ReviewSurface projectId="p1" stepId="s1" stepStatus="awaiting_review" onClose={() => {}} />);
     await screen.findByTestId('review-editor');
 
     fireEvent.click(screen.getByTestId('review-approve'));
@@ -99,16 +99,70 @@ describe('ReviewSurface', () => {
     expect(await screen.findByText('Approved.')).toBeTruthy();
   });
 
+  it('disables Approve again after a successful approve, so a second click cannot hit the server rejection', async () => {
+    stubHappyPath();
+    vi.spyOn(reviewApi, 'approveStep').mockResolvedValue({ step: { status: 'completed' }, project: {} });
+
+    render(<ReviewSurface projectId="p1" stepId="s1" stepStatus="awaiting_review" onClose={() => {}} />);
+    await screen.findByTestId('review-editor');
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByTestId('review-approve'));
+
+    expect(await screen.findByText('Approved.')).toBeTruthy();
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('surfaces a backend rejection (e.g. wrong step status) as an error message', async () => {
     stubHappyPath();
     vi.spyOn(reviewApi, 'approveStep').mockRejectedValue(new Error('Step is "completed", not awaiting_review'));
 
-    render(<ReviewSurface projectId="p1" stepId="s1" onClose={() => {}} />);
+    // Stale stepStatus prop scenario (e.g. gate flipped between load and
+    // click) — the UI-level disable is a courtesy, this proves the server's
+    // own rejection still surfaces correctly if it's ever reached.
+    render(<ReviewSurface projectId="p1" stepId="s1" stepStatus="awaiting_review" onClose={() => {}} />);
     await screen.findByTestId('review-editor');
 
     fireEvent.click(screen.getByTestId('review-approve'));
 
     expect(await screen.findByText('Step is "completed", not awaiting_review')).toBeTruthy();
+  });
+
+  it('disables Approve when opened on a step that is not awaiting review', async () => {
+    stubHappyPath();
+    render(<ReviewSurface projectId="p1" stepId="s1" stepStatus="completed" onClose={() => {}} />);
+    await screen.findByTestId('review-editor');
+
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('disables Approve when no stepStatus is supplied at all', async () => {
+    stubHappyPath();
+    render(<ReviewSurface projectId="p1" stepId="s1" onClose={() => {}} />);
+    await screen.findByTestId('review-editor');
+
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('re-enables Approve after a revise reopens the gate on a previously ungated step', async () => {
+    stubHappyPath();
+    vi.spyOn(reviewApi, 'reviseStep').mockResolvedValue({
+      success: true,
+      response: 'ok',
+      version: 3,
+      project: { steps: [{ id: 's1', status: 'awaiting_review' }] },
+    });
+
+    render(<ReviewSurface projectId="p1" stepId="s1" stepStatus="completed" onClose={() => {}} />);
+    await screen.findByTestId('review-editor');
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId('review-revise-toggle'));
+    fireEvent.input(screen.getByTestId('revise-comments'), { target: { value: 'Rework the ending.' } });
+    fireEvent.click(screen.getByTestId('revise-submit'));
+
+    expect(await screen.findByText('Agent revised the document (v3) — ready for your approval.')).toBeTruthy();
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('sends comments to the agent via Ask agent to revise and reloads on success', async () => {

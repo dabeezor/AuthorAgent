@@ -38,6 +38,10 @@ export interface ReviseResult {
   version?: number;
   error?: string;
   detail?: unknown;
+  /** The gateway returns the full updated project on success — narrowly
+   *  typed to just what the review surface needs (the revised step's new
+   *  status, so Approve can re-enable itself without a manual reopen). */
+  project?: { steps?: Array<{ id: string; status: string }> };
 }
 
 class ApiError extends Error {}
@@ -96,7 +100,7 @@ export function saveVersion(
   return request('POST', stepPath(projectId, stepId, '/versions'), { content, note });
 }
 
-export function approveStep(projectId: string, stepId: string): Promise<{ step: unknown; project: unknown }> {
+export function approveStep(projectId: string, stepId: string): Promise<{ step: { status?: string }; project: unknown }> {
   return request('POST', stepPath(projectId, stepId, '/approve'));
 }
 
