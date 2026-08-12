@@ -19,6 +19,7 @@ import { resolveWorkspaceRoot, resolveActiveWorkspace } from './services/workspa
 import { projectOutputDir, stepOutputFileName, resolveStepOutputPath } from './services/project-paths.js';
 
 import { ConfigService } from './services/config.js';
+import { getAppVersion } from './services/app-version.js';
 import { MemoryService } from './services/memory.js';
 import { SoulService } from './services/soul.js';
 import { HeartbeatService } from './services/heartbeat.js';
@@ -349,7 +350,7 @@ class AuthorAgentGateway {
 
   async initialize(): Promise<void> {
     logger.info('');
-    logger.info('  ✍️  AuthorAgent v3.0.0');
+    logger.info(`  ✍️  AuthorAgent v${getAppVersion(ROOT_DIR)}`);
     logger.info('  ═══════════════════════════════════');
     logger.info('  The Autonomous AI Writing Agent');
     logger.info('  An OpenClaw fork for authors');

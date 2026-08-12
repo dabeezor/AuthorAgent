@@ -12,7 +12,7 @@
 <title>AuthorAgent Dashboard</title>
 <style>
 /* ================================================================
-   AuthorAgent Dashboard v4.0.0 — Single-file SPA
+   AuthorAgent Dashboard — Single-file SPA
    ================================================================ */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -732,7 +732,7 @@ textarea { resize: vertical; min-height: 60px; }
     <span class="brand-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg></span>
     <div>
       <span class="brand-text">AuthorAgent</span>
-      <span class="brand-ver">v4.0.0</span>
+      <span class="brand-ver">&nbsp;</span>
     </div>
   </div>
   <div class="sidebar-nav">
@@ -7155,10 +7155,24 @@ function applyFooterLinks() {
 }
 
 // ================================================================
+// SIDEBAR VERSION — reads the real version from GET /api/health instead
+// of a hardcoded string in the markup, which is exactly what drifted out
+// of sync with package.json before (ALP: sidebar showed v4.0.0 while the
+// server was actually running a newer build).
+// ================================================================
+function applyAppVersion() {
+  api('GET', '/api/health').then(function(data) {
+    var el = document.querySelector('.sidebar-brand .brand-ver');
+    if (el && data && data.version) el.textContent = 'v' + data.version;
+  }).catch(function() { /* static markup version remains as a fallback */ });
+}
+
+// ================================================================
 // INITIALIZATION
 // ================================================================
 renderKeyProviders();
 applyFooterLinks();
+applyAppVersion();
 startPolling();
 
 })();
