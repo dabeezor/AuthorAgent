@@ -77,3 +77,77 @@ describe('MemoryService.getRelevant — relevant-memory budget', () => {
     expect(result).not.toContain('[truncated]'); // getRelevant doesn't mark truncation explicitly, but the full string should survive
   });
 });
+
+describe('MemoryService.addNote — freeform story-note capture', () => {
+  let memoryDir: string;
+  let memory: MemoryService;
+
+  beforeEach(async () => {
+    memoryDir = await mkdtemp(join(tmpdir(), 'authoragent-memory-notes-test-'));
+    memory = new MemoryService(memoryDir, {});
+    await memory.initialize();
+  });
+
+  afterEach(async () => {
+    await rm(memoryDir, { recursive: true, force: true });
+  });
+
+  async function readNotesFile(): Promise<any[]> {
+    const { readFile } = await import('fs/promises');
+    const raw = await readFile(join(memoryDir, 'notes.jsonl'), 'utf-8');
+    return raw.trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+  }
+
+  it('appends a note to memory/notes.jsonl and returns its id + timestamp', async () => {
+    const { id, timestamp } = await memory.addNote('the aunt should know about the letter before ch.9');
+    expect(id).toMatch(/^note-/);
+    expect(timestamp).toBeTruthy();
+
+    const notes = await readNotesFile();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].id).toBe(id);
+    expect(notes[0].text).toBe('the aunt should know about the letter before ch.9');
+  });
+
+  it('appends multiple notes without clobbering earlier ones', async () => {
+    await memory.addNote('first idea');
+    await memory.addNote('second idea');
+    const notes = await readNotesFile();
+    expect(notes).toHaveLength(2);
+    expect(notes.map(n => n.text)).toEqual(['first idea', 'second idea']);
+  });
+
+  it('truncates to 5,000 characters, same cap as conversation turns', async () => {
+    await memory.addNote('x'.repeat(6000));
+    const notes = await readNotesFile();
+    expect(notes[0].text.length).toBe(5000);
+  });
+
+  it('tags the note with the currently-active persona/project by default', async () => {
+    await memory.setActiveProject('proj-1');
+    await memory.setActivePersona('persona-a');
+    await memory.addNote('tagged note');
+    const notes = await readNotesFile();
+    expect(notes[0].projectId).toBe('proj-1');
+    expect(notes[0].personaId).toBe('persona-a');
+  });
+
+  it('lets the caller override persona/project context explicitly', async () => {
+    await memory.setActiveProject('proj-1');
+    await memory.addNote('override note', { personaId: null, projectId: 'proj-2' });
+    const notes = await readNotesFile();
+    expect(notes[0].projectId).toBe('proj-2');
+    expect(notes[0].personaId).toBeNull();
+  });
+
+  it('calls the note live-index hook with the same data written to disk', async () => {
+    const hook = vi.fn();
+    memory.setNoteIndexHook(hook);
+    const { id, timestamp } = await memory.addNote('hooked note');
+    expect(hook).toHaveBeenCalledWith(expect.objectContaining({ id, timestamp, text: 'hooked note' }));
+  });
+
+  it('does not throw if no index hook is registered', async () => {
+    await expect(memory.addNote('no hook registered')).resolves.toBeTruthy();
+  });
+});

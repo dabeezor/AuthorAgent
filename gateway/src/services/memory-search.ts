@@ -326,6 +326,40 @@ export class MemorySearchService {
       }
     }
 
+    // ── Notes (memory/notes.jsonl — one line per jotted note) ──
+    const notesPath = join(this.memoryDir, 'notes.jsonl');
+    if (existsSync(notesPath)) {
+      try {
+        const notesStats = await stat(notesPath);
+        const mtime = notesStats.mtime.toISOString();
+        // Whole-file granularity (unlike per-date conversation files) — skip
+        // only if nothing has been appended since the last index pass.
+        if (!lastIndexed || mtime >= lastIndexed || opts.force) {
+          const raw = await readFile(notesPath, 'utf-8');
+          const lines = raw.trim().split('\n').filter(Boolean);
+          for (const line of lines) {
+            try {
+              const note = JSON.parse(line);
+              if (!note.id) continue;
+              this.upsert({
+                source: 'note',
+                sourceType: 'jsonl-line',
+                sourceRef: `notes.jsonl#${note.id}`,
+                personaId: note.personaId || null,
+                projectId: note.projectId || null,
+                timestamp: note.timestamp || mtime,
+                title: null,
+                body: String(note.text || '').substring(0, 50000),
+              });
+              indexed++;
+            } catch { /* malformed line — skip */ }
+          }
+        } else {
+          skipped++;
+        }
+      } catch { /* file gone or unreadable */ }
+    }
+
     // ── Project step outputs (each .md file in workspace/projects/<slug>/) ──
     const projectsDir = join(this.workspaceDir, 'projects');
     if (existsSync(projectsDir)) {
@@ -463,6 +497,31 @@ export class MemorySearchService {
       timestamp: input.timestamp,
       title: null,
       body: `[user] ${input.user}\n[assistant] ${input.assistant}`.substring(0, 50000),
+    });
+  }
+
+  /**
+   * Index a single note as it's jotted down (called from MemoryService).
+   * Cheap — just one insert. Mirrors indexConversationTurn() but tags the
+   * row source: 'note' so it can be filtered independently of chat history.
+   */
+  indexNote(input: {
+    id: string;
+    text: string;
+    timestamp: string;
+    personaId?: string | null;
+    projectId?: string | null;
+  }): void {
+    if (!this.db) return;
+    this.upsert({
+      source: 'note',
+      sourceType: 'jsonl-line',
+      sourceRef: `notes.jsonl#${input.id}`,
+      personaId: input.personaId ?? null,
+      projectId: input.projectId ?? null,
+      timestamp: input.timestamp,
+      title: null,
+      body: input.text.substring(0, 50000),
     });
   }
 
