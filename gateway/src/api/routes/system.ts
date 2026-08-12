@@ -6,6 +6,7 @@
 import { Request, Response } from 'express';
 import type { ApiContext } from '../context.js';
 import { validateKeyFormat, hasProviderKeyName, isVoiceProfileTemplate } from '../context.js';
+import { getAppVersion } from '../../services/app-version.js';
 
 export function registerSystemRoutes(ctx: ApiContext): void {
   const { app, gateway, services, baseDir } = ctx;
@@ -14,7 +15,7 @@ export function registerSystemRoutes(ctx: ApiContext): void {
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
-      version: '4.0.0',
+      version: getAppVersion(baseDir),
       name: 'AuthorAgent',
       brand: 'Writing Secrets',
       uptime: process.uptime(),
