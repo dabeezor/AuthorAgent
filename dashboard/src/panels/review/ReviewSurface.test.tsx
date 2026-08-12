@@ -99,6 +99,20 @@ describe('ReviewSurface', () => {
     expect(await screen.findByText('Approved.')).toBeTruthy();
   });
 
+  it('disables Approve again after a successful approve, so a second click cannot hit the server rejection', async () => {
+    stubHappyPath();
+    vi.spyOn(reviewApi, 'approveStep').mockResolvedValue({ step: { status: 'completed' }, project: {} });
+
+    render(<ReviewSurface projectId="p1" stepId="s1" stepStatus="awaiting_review" onClose={() => {}} />);
+    await screen.findByTestId('review-editor');
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByTestId('review-approve'));
+
+    expect(await screen.findByText('Approved.')).toBeTruthy();
+    expect((screen.getByTestId('review-approve') as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('surfaces a backend rejection (e.g. wrong step status) as an error message', async () => {
     stubHappyPath();
     vi.spyOn(reviewApi, 'approveStep').mockRejectedValue(new Error('Step is "completed", not awaiting_review'));

@@ -131,7 +131,11 @@ export function ReviewSurface({ projectId, stepId, stepLabel, stepStatus, onClos
     setBusy('approve');
     setMessage(null);
     try {
-      await reviewApi.approveStep(projectId, stepId);
+      const result = await reviewApi.approveStep(projectId, stepId);
+      // Approving always completes the step (decideStepGate -> completeStepBare)
+      // — re-sync so this button disables itself instead of inviting a
+      // pointless second click the server would now reject.
+      setGateStatus(result.step?.status ?? 'completed');
       setMessage({ kind: 'success', text: 'Approved.' });
     } catch (err) {
       setMessage({ kind: 'error', text: (err as Error).message });

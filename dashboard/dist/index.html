@@ -3322,7 +3322,7 @@ function openProjectDetail(id) {
       // approve all work unchanged; the API and ReviewSurface are gate-agnostic
       // already, this button is just an unconditional entry point to them.
       var reviewBtn = '';
-      if (s.status !== 'pending') {
+      if (s.result || s.output) {
         reviewBtn = '<button class="small pd-review-step" data-step-id="' + esc(s.id) + '" data-step-label="' + esc(s.label || '') + '" data-step-status="' + esc(s.status) + '" ' +
           'style="font-size:10px;padding:3px 8px;margin-left:4px;" ' +
           'title="Open this step\'s output to comment or edit inline">Review</button>';

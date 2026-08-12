@@ -100,7 +100,7 @@ export function saveVersion(
   return request('POST', stepPath(projectId, stepId, '/versions'), { content, note });
 }
 
-export function approveStep(projectId: string, stepId: string): Promise<{ step: unknown; project: unknown }> {
+export function approveStep(projectId: string, stepId: string): Promise<{ step: { status?: string }; project: unknown }> {
   return request('POST', stepPath(projectId, stepId, '/approve'));
 }
 
